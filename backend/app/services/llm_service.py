@@ -1,25 +1,58 @@
 from openai import AsyncOpenAI
 from typing import Optional, Tuple
 from app.config import settings
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from app.models.setting import Setting
+import logging
+
+logger = logging.getLogger(__name__)
 
 
-def get_llm_client() -> AsyncOpenAI:
+async def get_llm_config(db: Optional[AsyncSession] = None) -> dict:
+    """Get LLM configuration from database or fallback to env"""
+    config = {
+        "api_key": settings.llm_api_key,
+        "api_base": settings.llm_api_base,
+        "model": settings.llm_model,
+    }
+
+    if db:
+        result = await db.execute(select(Setting))
+        db_settings = {s.key: s.value for s in result.scalars().all()}
+
+        if "llm_api_key" in db_settings and db_settings["llm_api_key"]:
+            config["api_key"] = db_settings["llm_api_key"]
+        if "llm_api_base" in db_settings and db_settings["llm_api_base"]:
+            config["api_base"] = db_settings["llm_api_base"]
+        if "llm_model" in db_settings and db_settings["llm_model"]:
+            config["model"] = db_settings["llm_model"]
+
+    return config
+
+
+def get_llm_client(api_key: str = None, api_base: str = None) -> AsyncOpenAI:
     return AsyncOpenAI(
-        api_key=settings.llm_api_key,
-        base_url=settings.llm_api_base
+        api_key=api_key or settings.llm_api_key,
+        base_url=api_base or settings.llm_api_base
     )
 
 
-async def test_connection() -> str:
-    client = get_llm_client()
+async def test_connection(db: Optional[AsyncSession] = None) -> str:
+    config = await get_llm_config(db)
+    logger.info(f"[LLM TEST] API Key length: {len(config['api_key'])}")
+    logger.info(f"[LLM TEST] API Key: {config['api_key'][:10]}...")
+    logger.info(f"[LLM TEST] API Base: {config['api_base']}")
+    logger.info(f"[LLM TEST] Model: {config['model']}")
+    client = get_llm_client(config["api_key"], config["api_base"])
 
     response = await client.chat.completions.create(
-        model=settings.llm_model,
+        model=config["model"],
         messages=[{"role": "user", "content": "Hi"}],
         max_tokens=10
     )
 
-    return settings.llm_model
+    return config["model"]
 
 
 async def generate_tweet_content(
@@ -27,9 +60,11 @@ async def generate_tweet_content(
     style: str = "professional",
     language: str = "en",
     max_length: int = 280,
-    template_prompt: Optional[str] = None
+    template_prompt: Optional[str] = None,
+    db: Optional[AsyncSession] = None
 ) -> Tuple[str, Optional[int]]:
-    client = get_llm_client()
+    config = await get_llm_config(db)
+    client = get_llm_client(config["api_key"], config["api_base"])
 
     if template_prompt:
         prompt = template_prompt.format(topic=topic)
@@ -49,7 +84,7 @@ Requirements:
 Output only the tweet content, nothing else."""
 
     response = await client.chat.completions.create(
-        model=settings.llm_model,
+        model=config["model"],
         messages=[
             {
                 "role": "system",
@@ -58,7 +93,7 @@ Output only the tweet content, nothing else."""
             {"role": "user", "content": prompt}
         ],
         max_tokens=500,
-        **({} if "reasoner" in settings.llm_model else {"temperature": 0.8})
+        **({} if "reasoner" in config["model"] else {"temperature": 0.8})
     )
 
     content = response.choices[0].message.content or ""

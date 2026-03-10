@@ -1,0 +1,56 @@
+[
+  {
+    "name": "auth_token",
+    "value": "请替换为你的auth_token值（从浏览器开发者工具中复制）",
+    "domain": ".x.com",
+    "path": "/",
+    "secure": true,
+    "httpOnly": true,
+    "sameSite": "None"
+  },
+  {
+    "name": "ct0",
+    "value": "1948332ddbee1285b080013c71eb1ebaf8e40cbeb0b494107157536498b09abd690e71aea145687e05d4068ac6423dc1373f088e56f6c4b2bba34843ab4ed94bc34792815c3f56934729cfe99488e8ed",
+    "domain": ".x.com",
+    "path": "/",
+    "secure": false,
+    "httpOnly": false,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "twid",
+    "value": "u%3D1966380483111170049",
+    "domain": ".x.com",
+    "path": "/",
+    "secure": true,
+    "httpOnly": false,
+    "sameSite": "None"
+  },
+  {
+    "name": "kdt",
+    "value": "m3mLAu21wfjWDSn1tARmbAYMbE75N2N3xxkQ9tPB",
+    "domain": ".x.com",
+    "path": "/",
+    "secure": true,
+    "httpOnly": true,
+    "sameSite": "None"
+  },
+  {
+    "name": "cf_clearance",
+    "value": "UhogLK7CrDbMFaMTaKEy0UVpy.m.ZU2.XCYhYNJscgA-1765780646-1.2.1.1-.rb.0a1EclblQAjc9DYIK04ZbJj4rFLGOU3nJD8.9zgH_ioCYx5YOll5FhRYU43a_Pt1phHulVKGIa.dwH17PzyVpR3c6D8Juafj4574juGbpPtCgmlXWWMMW149p3KljMQRYiBgoTD23x3a7rFXwAUohVDw_vjFmY5FJA1YjAO5RTCGDATFQpe1ivjAbKDxZX4IJqqvgFRPqmL4YG2AzT9RdfHpkfEvzL1DaGGeNso",
+    "domain": ".x.com",
+    "path": "/",
+    "secure": true,
+    "httpOnly": true,
+    "sameSite": "None"
+  },
+  {
+    "name": "guest_id",
+    "value": "v1%3A177312751101080526",
+    "domain": ".x.com",
+    "path": "/",
+    "secure": true,
+    "httpOnly": false,
+    "sameSite": "None"
+  }
+]

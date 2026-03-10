@@ -1,6 +1,9 @@
 from typing import Optional, List
 import os
+import asyncio
+import traceback
 from twikit import Client
+from twikit.errors import BadRequest, Unauthorized
 from app.config import settings
 from app.models.tweet import Tweet
 from app.logger import setup_logger
@@ -14,7 +17,9 @@ class TwitterTwikit:
         self.cookies_file = "./data/twitter_cookies.json"
 
     def _create_client(self) -> Client:
-        client = Client(language='en-US', proxy=settings.proxy_url)
+        proxy = settings.proxy_url if settings.proxy_url else None
+        logger.info("创建 twikit 客户端，代理: %s", proxy or "无")
+        client = Client(language='en-US', proxy=proxy)
         # 修复 twikit 2.3.3 bug: onboarding_task 等方法未携带完整 headers
         # 导致 Cloudflare 因缺少 User-Agent 而拦截请求返回 403
         client.http.headers.update({
@@ -25,16 +30,25 @@ class TwitterTwikit:
         return client
 
     async def init_client(self):
-        logger.info("初始化 twikit 客户端，代理: %s", settings.proxy_url)
+        logger.info("初始化 twikit 客户端")
         self.client = self._create_client()
 
         if os.path.exists(self.cookies_file):
             try:
                 self.client.load_cookies(self.cookies_file)
                 logger.info("从 cookie 文件恢复登录状态成功")
-                return
+                # 验证 cookie 是否有效
+                try:
+                    await self.client.user()
+                    logger.info("Cookie 验证成功")
+                    return
+                except (Unauthorized, BadRequest) as e:
+                    logger.warning("Cookie 已过期，将删除并重新登录: %s", e)
+                    os.remove(self.cookies_file)
             except Exception as e:
                 logger.warning("加载 cookie 失败，将重新登录: %s", e)
+                if os.path.exists(self.cookies_file):
+                    os.remove(self.cookies_file)
 
         await self.login()
 
@@ -46,20 +60,249 @@ class TwitterTwikit:
         login_email = email or settings.twitter_email
         login_password = password or settings.twitter_password
 
+        if not login_username or not login_email or not login_password:
+            raise ValueError("Twitter 账号信息未配置，请在 .env 文件或前端 Settings 页面配置")
+
         logger.info("开始登录 Twitter (v2.x ui_metrics 已启用)，账号: %s", login_username)
-        try:
-            await self.client.login(
-                auth_info_1=login_username,
-                auth_info_2=login_email,
-                password=login_password,
-                cookies_file=self.cookies_file,
-                enable_ui_metrics=True
-            )
-            self.client.save_cookies(self.cookies_file)
-            logger.info("登录成功，cookie 已保存")
-        except Exception as e:
-            logger.error("登录失败: %s", e)
-            raise
+
+        # 删除旧的 cookie 文件（如果存在）
+        if os.path.exists(self.cookies_file):
+            logger.info("删除旧的 cookie 文件")
+            os.remove(self.cookies_file)
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                logger.info("登录尝试 %d/%d", attempt + 1, max_retries)
+                await self.client.login(
+                    auth_info_1=login_username,
+                    auth_info_2=login_email,
+                    password=login_password,
+                    cookies_file=self.cookies_file,
+                    enable_ui_metrics=True
+                )
+                self.client.save_cookies(self.cookies_file)
+                logger.info("登录成功，cookie 已保存")
+                return
+            except BadRequest as e:
+                error_msg = str(e)
+                logger.error("登录失败 (尝试 %d/%d): %s", attempt + 1, max_retries, error_msg)
+
+                # 详细的错误分类和提示
+                if "Could not log you in now" in error_msg or "399" in error_msg:
+                    if attempt < max_retries - 1:
+                        wait_time = (attempt + 1) * 10  # 10s, 20s, 30s
+                        logger.info("等待 %d 秒后重试...", wait_time)
+                        await asyncio.sleep(wait_time)
+                        # 重新创建客户端
+                        self.client = self._create_client()
+                    else:
+                        raise Exception(
+                            f"❌ 登录失败: Twitter 服务端临时限制 (错误 399)\n\n"
+                            f"【错误原因】\n"
+                            f"Twitter 检测到异常登录行为，暂时拒绝了登录请求。\n\n"
+                            f"【可能原因】\n"
+                            f"1. IP 地址被标记为可疑（代理IP质量差或被滥用）\n"
+                            f"2. 登录频率过高（短时间内多次尝试）\n"
+                            f"3. 账号密码错误导致多次失败\n"
+                            f"4. 缺少有效的代理配置（中国大陆必需）\n\n"
+                            f"【当前配置】\n"
+                            f"- 代理: {settings.proxy_url or '❌ 未配置'}\n"
+                            f"- 账号: {login_username}\n\n"
+                            f"【解决方案】\n"
+                            f"1. 检查代理配置是否正确（.env 中的 PROXY_URL）\n"
+                            f"2. 更换代理 IP（使用高质量的住宅代理）\n"
+                            f"3. 等待 2-3 小时后重试\n"
+                            f"4. 确认账号密码正确\n"
+                            f"5. 先在浏览器中手动登录一次 https://x.com\n\n"
+                            f"【原始错误】\n{error_msg}"
+                        )
+                elif "326" in error_msg or "locked" in error_msg.lower():
+                    raise Exception(
+                        f"❌ 登录失败: 账号被锁定 (错误 326)\n\n"
+                        f"【错误原因】\n"
+                        f"Twitter 检测到账号存在异常活动，已暂时锁定。\n\n"
+                        f"【解决方案】\n"
+                        f"1. 访问 https://x.com 在浏览器中登录\n"
+                        f"2. 完成 Twitter 要求的验证（手机验证、邮箱验证等）\n"
+                        f"3. 解锁后等待 1 小时再使用 twikit 登录\n\n"
+                        f"【原始错误】\n{error_msg}"
+                    )
+                elif "403" in error_msg or "Forbidden" in error_msg:
+                    raise Exception(
+                        f"❌ 登录失败: 请求被拒绝 (错误 403)\n\n"
+                        f"【错误原因】\n"
+                        f"Cloudflare 或 Twitter 防火墙拦截了请求。\n\n"
+                        f"【可能原因】\n"
+                        f"1. User-Agent 不正确或缺失\n"
+                        f"2. 请求头不完整\n"
+                        f"3. IP 被 Cloudflare 封禁\n"
+                        f"4. 代理配置错误\n\n"
+                        f"【当前配置】\n"
+                        f"- 代理: {settings.proxy_url or '❌ 未配置'}\n\n"
+                        f"【解决方案】\n"
+                        f"1. 升级 twikit 到最新版本: pip install -U twikit\n"
+                        f"2. 更换代理 IP\n"
+                        f"3. 检查代理是否能正常访问 https://x.com\n"
+                        f"4. 确认 twikit 版本 >= 2.3.3\n\n"
+                        f"【原始错误】\n{error_msg}"
+                    )
+                elif "401" in error_msg or "Unauthorized" in error_msg:
+                    raise Exception(
+                        f"❌ 登录失败: 认证失败 (错误 401)\n\n"
+                        f"【错误原因】\n"
+                        f"账号密码不正确，或账号状态异常。\n\n"
+                        f"【解决方案】\n"
+                        f"1. 检查用户名、邮箱、密码是否正确\n"
+                        f"2. 确认账号未被停用或删除\n"
+                        f"3. 尝试在浏览器中登录 https://x.com 验证账号状态\n"
+                        f"4. 如果最近修改过密码，请更新 .env 配置\n\n"
+                        f"【当前账号】\n"
+                        f"- 用户名: {login_username}\n"
+                        f"- 邮箱: {login_email}\n\n"
+                        f"【原始错误】\n{error_msg}"
+                    )
+                elif "password" in error_msg.lower() or "credentials" in error_msg.lower():
+                    raise Exception(
+                        f"❌ 登录失败: 账号密码错误\n\n"
+                        f"【错误原因】\n"
+                        f"提供的用户名、邮箱或密码不正确。\n\n"
+                        f"【当前配置】\n"
+                        f"- 用户名: {login_username}\n"
+                        f"- 邮箱: {login_email}\n"
+                        f"- 密码: {'*' * len(login_password) if login_password else '❌ 未配置'}\n\n"
+                        f"【解决方案】\n"
+                        f"1. 检查 .env 文件中的 TWITTER_USERNAME、TWITTER_EMAIL、TWITTER_PASSWORD\n"
+                        f"2. 确认密码没有特殊字符导致的转义问题\n"
+                        f"3. 尝试在浏览器中登录验证账号密码\n"
+                        f"4. 如果使用了两步验证，可能需要应用专用密码\n\n"
+                        f"【原始错误】\n{error_msg}"
+                    )
+                else:
+                    # 未知的 BadRequest 错误
+                    raise Exception(
+                        f"❌ 登录失败: Twitter API 请求错误\n\n"
+                        f"【错误类型】BadRequest\n\n"
+                        f"【可能原因】\n"
+                        f"1. 请求参数格式错误\n"
+                        f"2. Twitter API 返回了未预期的错误\n"
+                        f"3. 网络连接不稳定\n\n"
+                        f"【当前配置】\n"
+                        f"- 代理: {settings.proxy_url or '❌ 未配置'}\n"
+                        f"- 账号: {login_username}\n\n"
+                        f"【解决方案】\n"
+                        f"1. 检查网络连接和代理配置\n"
+                        f"2. 查看完整错误信息并搜索解决方案\n"
+                        f"3. 尝试更新 twikit: pip install -U twikit\n"
+                        f"4. 如果问题持续，请提交 issue 到 twikit 项目\n\n"
+                        f"【原始错误】\n{error_msg}"
+                    )
+            except Unauthorized as e:
+                error_msg = str(e)
+                logger.error("登录失败 (认证错误): %s", error_msg)
+                raise Exception(
+                    f"❌ 登录失败: Cookie 已过期或无效 (Unauthorized)\n\n"
+                    f"【错误原因】\n"
+                    f"保存的 Cookie 已失效，需要重新登录。\n\n"
+                    f"【解决方案】\n"
+                    f"1. 删除旧的 cookie 文件: rm -f ./data/twitter_cookies.json\n"
+                    f"2. 重新登录\n"
+                    f"3. 如果问题持续，检查账号状态\n\n"
+                    f"【原始错误】\n{error_msg}"
+                )
+            except Exception as e:
+                error_msg = f"{type(e).__name__}: {str(e)}" if str(e) else type(e).__name__
+                error_type = type(e).__name__
+                logger.error("登录失败: %s", error_msg)
+                logger.error("完整错误堆栈: %s", traceback.format_exc())
+
+                # 根据异常类型提供详细提示
+                if "timeout" in error_msg.lower() or "TimeoutError" in error_type:
+                    raise Exception(
+                        f"❌ 登录失败: 网络超时 (Timeout)\n\n"
+                        f"【错误原因】\n"
+                        f"连接 Twitter 服务器超时，可能是网络问题或代理问题。\n\n"
+                        f"【当前配置】\n"
+                        f"- 代理: {settings.proxy_url or '❌ 未配置'}\n\n"
+                        f"【解决方案】\n"
+                        f"1. 检查网络连接是否正常\n"
+                        f"2. 检查代理服务是否运行（端口 7896）\n"
+                        f"3. 测试代理: curl -x {settings.proxy_url or 'http://127.0.0.1:7896'} https://x.com\n"
+                        f"4. 尝试更换代理服务器\n"
+                        f"5. 增加超时时间（如果网络较慢）\n\n"
+                        f"【原始错误】\n{error_msg}"
+                    )
+                elif "connection" in error_msg.lower() or "ConnectionError" in error_type:
+                    raise Exception(
+                        f"❌ 登录失败: 网络连接失败 (Connection Error)\n\n"
+                        f"【错误原因】\n"
+                        f"无法连接到 Twitter 服务器。\n\n"
+                        f"【可能原因】\n"
+                        f"1. 代理配置错误或代理服务未运行\n"
+                        f"2. 网络连接中断\n"
+                        f"3. Twitter 服务器暂时不可用\n"
+                        f"4. 防火墙阻止了连接\n\n"
+                        f"【当前配置】\n"
+                        f"- 代理: {settings.proxy_url or '❌ 未配置（中国大陆必需）'}\n\n"
+                        f"【解决方案】\n"
+                        f"1. 确认代理服务正在运行: ps aux | grep clash\n"
+                        f"2. 测试代理连接: curl -x {settings.proxy_url or 'http://127.0.0.1:7896'} -I https://x.com\n"
+                        f"3. 检查 .env 中的 PROXY_URL 配置\n"
+                        f"4. Docker 容器内使用: http://host.docker.internal:7896\n"
+                        f"5. 宿主机使用: http://127.0.0.1:7896\n\n"
+                        f"【原始错误】\n{error_msg}"
+                    )
+                elif "proxy" in error_msg.lower():
+                    raise Exception(
+                        f"❌ 登录失败: 代理错误 (Proxy Error)\n\n"
+                        f"【错误原因】\n"
+                        f"代理服务器配置错误或无法连接。\n\n"
+                        f"【当前配置】\n"
+                        f"- 代理: {settings.proxy_url or '❌ 未配置'}\n\n"
+                        f"【解决方案】\n"
+                        f"1. 检查代理地址格式: http://host:port\n"
+                        f"2. 确认代理服务正在运行\n"
+                        f"3. Docker 容器内必须使用: http://host.docker.internal:7896\n"
+                        f"4. 测试代理: curl -x {settings.proxy_url} -I https://x.com\n"
+                        f"5. 如果不需要代理，设置 PROXY_URL 为空\n\n"
+                        f"【原始错误】\n{error_msg}"
+                    )
+                elif not str(e):
+                    # 空错误信息，通常是网络问题
+                    raise Exception(
+                        f"❌ 登录失败: 未知错误（错误信息为空）\n\n"
+                        f"【错误类型】{error_type}\n\n"
+                        f"【可能原因】\n"
+                        f"1. 网络连接失败（最常见）\n"
+                        f"2. 代理配置错误\n"
+                        f"3. Twitter 服务器无响应\n"
+                        f"4. 请求被防火墙拦截\n\n"
+                        f"【当前配置】\n"
+                        f"- 代理: {settings.proxy_url or '❌ 未配置（中国大陆必需）'}\n"
+                        f"- 账号: {login_username}\n\n"
+                        f"【解决方案】\n"
+                        f"1. 配置代理: PROXY_URL=http://host.docker.internal:7896\n"
+                        f"2. 确认代理服务运行: systemctl status clash\n"
+                        f"3. 测试网络: curl -x http://127.0.0.1:7896 https://x.com\n"
+                        f"4. 查看完整日志: docker compose logs backend -f\n\n"
+                        f"【调试信息】\n"
+                        f"错误堆栈:\n{traceback.format_exc()}"
+                    )
+                else:
+                    raise Exception(
+                        f"❌ 登录失败: {error_type}\n\n"
+                        f"【错误信息】\n{error_msg}\n\n"
+                        f"【当前配置】\n"
+                        f"- 代理: {settings.proxy_url or '❌ 未配置'}\n"
+                        f"- 账号: {login_username}\n\n"
+                        f"【解决方案】\n"
+                        f"1. 查看上方的错误信息\n"
+                        f"2. 搜索错误信息寻找解决方案\n"
+                        f"3. 检查网络和代理配置\n"
+                        f"4. 查看完整日志: docker compose logs backend --tail 100\n\n"
+                        f"【调试信息】\n"
+                        f"错误堆栈:\n{traceback.format_exc()}"
+                    )
 
     async def get_me(self) -> dict:
         if not self.client:
@@ -71,7 +314,11 @@ class TwitterTwikit:
 
     async def post_tweet(self, content: str, media_paths: List[str] = []) -> str:
         if not self.client:
-            await self.init_client()
+            try:
+                await self.init_client()
+            except Exception as e:
+                logger.error("Twitter 未登录，无法发布推文: %s", e)
+                raise ValueError("Twitter 未登录，请先在 Settings 页面登录 Twitter 账号")
 
         media_ids = []
         if media_paths:
@@ -92,7 +339,11 @@ class TwitterTwikit:
 
     async def search_tweets(self, query: str, count: int = 20) -> List[dict]:
         if not self.client:
-            await self.init_client()
+            try:
+                await self.init_client()
+            except Exception as e:
+                logger.error("Twitter 未登录，无法搜索: %s", e)
+                raise ValueError("Twitter 未登录，请先在 Settings 页面登录 Twitter 账号")
 
         logger.info("搜索推文，关键词: %s，数量: %d", query, count)
         try:
@@ -120,7 +371,11 @@ class TwitterTwikit:
 
     async def reply_tweet(self, tweet_id: str, content: str) -> str:
         if not self.client:
-            await self.init_client()
+            try:
+                await self.init_client()
+            except Exception as e:
+                logger.error("Twitter 未登录，无法回复推文: %s", e)
+                raise ValueError("Twitter 未登录，请先在 Settings 页面登录 Twitter 账号")
 
         logger.info("回复推文 %s，内容长度: %d 字符", tweet_id, len(content))
         try:

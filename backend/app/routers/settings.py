@@ -35,6 +35,16 @@ async def get_settings(db: AsyncSession = Depends(get_db)):
         settings_dict["twitter_password_saved"] = True
         del settings_dict["twitter_password"]
 
+    # 如果数据库中有保存的 llm_api_key，用掩码显示
+    if "llm_api_key" in settings_dict and settings_dict["llm_api_key"]:
+        settings_dict["llm_api_key_saved"] = True
+        # 显示前4位和后4位，中间用星号
+        key = settings_dict["llm_api_key"]
+        if len(key) > 8:
+            settings_dict["llm_api_key"] = f"{key[:4]}{'*' * (len(key) - 8)}{key[-4:]}"
+        else:
+            settings_dict["llm_api_key"] = "****"
+
     return SettingsResponse(settings=settings_dict)
 
 
@@ -147,17 +157,22 @@ async def test_twitter_connection():
 
 
 @router.post("/test-llm", response_model=LLMTestResponse)
-async def test_llm_connection():
+async def test_llm_connection(db: AsyncSession = Depends(get_db)):
     from app.services.llm_service import test_connection
+    import logging
+    logger = logging.getLogger(__name__)
 
     try:
-        model = await test_connection()
+        model = await test_connection(db)
         return LLMTestResponse(
             success=True,
             message="LLM connection successful",
             model=model
         )
     except Exception as e:
+        logger.error(f"[LLM TEST ERROR] {type(e).__name__}: {str(e)}")
+        import traceback
+        logger.error(f"[LLM TEST TRACEBACK] {traceback.format_exc()}")
         return LLMTestResponse(
             success=False,
             message=str(e)

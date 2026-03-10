@@ -258,6 +258,21 @@ export default function Settings() {
               </div>
 
               <div>
+                <label className="text-sm font-medium">API Key</label>
+                <Input
+                  type="password"
+                  value={settings.llm_api_key || ''}
+                  onChange={(e) => setSettings({ ...settings, llm_api_key: e.target.value })}
+                  onBlur={(e) => handleSave('llm_api_key', e.target.value)}
+                  placeholder="sk-xxxxxxxxxxxxxxxx"
+                  className="mt-1"
+                />
+                <p className="text-xs text-muted-foreground mt-1">
+                  API Key 会加密保存到数据库
+                </p>
+              </div>
+
+              <div>
                 <label className="text-sm font-medium">模型</label>
                 <Input
                   value={settings.llm_model || ''}
@@ -342,12 +357,15 @@ export default function Settings() {
               <div>
                 <h4 className="font-medium text-foreground">LLM服务</h4>
                 <p>
-                  需要在 <code>.env</code> 文件中配置：
+                  在上方 LLM 配置区域直接输入 API Key、API Base URL 和模型名称即可。
+                </p>
+                <p className="mt-2">
+                  支持的服务：
                 </p>
                 <ul className="list-disc list-inside mt-2 space-y-1">
-                  <li>LLM_API_KEY</li>
-                  <li>LLM_API_BASE (可选，默认OpenAI)</li>
-                  <li>LLM_MODEL (可选，默认gpt-4o)</li>
+                  <li>Deepseek (推荐): https://api.deepseek.com, deepseek-chat</li>
+                  <li>OpenAI: https://api.openai.com/v1, gpt-4o</li>
+                  <li>其他 OpenAI 兼容服务</li>
                 </ul>
               </div>
             </div>

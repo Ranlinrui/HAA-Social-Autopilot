@@ -13,8 +13,8 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = "gpt-4o"
 
-    # 代理配置
-    proxy_url: str = "http://127.0.0.1:7890"
+    # 代理配置（留空则不使用代理）
+    proxy_url: str = ""
 
     # 服务配置
     backend_port: int = 8000
