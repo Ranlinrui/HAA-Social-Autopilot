@@ -1,0 +1,36 @@
+# FastAPI and ASGI server
+fastapi==0.109.2
+uvicorn[standard]==0.27.1
+
+# Database
+sqlalchemy==2.0.25
+aiosqlite==0.19.0
+
+# Scheduler
+apscheduler==3.10.4
+
+# Twitter 非官方API (唯一发布引擎，免费无限制)
+twikit==2.3.3
+
+# LLM client
+openai==1.12.0
+
+# Validation and settings
+pydantic==2.6.1
+pydantic-settings==2.1.0
+python-dotenv==1.0.1
+
+# File handling
+python-multipart==0.0.9
+aiofiles==23.2.1
+pillow==10.2.0
+
+# Utilities
+httpx[socks]==0.26.0
+python-dateutil==2.8.2
+
+# twikit 2.x 新增依赖
+lxml
+webvtt-py
+m3u8
+Js2Py-3.13
