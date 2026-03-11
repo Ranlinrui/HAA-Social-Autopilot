@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { settingsApi } from '@/services/api'
+import TwitterCookieManager from '@/components/TwitterCookieManager'
 
 interface TestResult {
   success: boolean
@@ -238,6 +239,9 @@ export default function Settings() {
             </div>
           </CardContent>
         </Card>
+
+        {/* Twitter Cookie Manager */}
+        <TwitterCookieManager />
 
         <Card>
           <CardHeader>

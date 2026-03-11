@@ -22,6 +22,13 @@ const PRESET_QUERIES = [
   'crypto trading AI agent',
   'perpetual futures AI',
   'DeepSeek trading',
+  'AI量化真的能赚钱吗',
+  '量化交易靠谱吗',
+  'AI交易机器人有用吗',
+  '加密货币自动交易怎么样',
+  'crypto bot worth it',
+  'is AI trading profitable',
+  'automated trading reliable',
 ]
 
 export default function Engage() {

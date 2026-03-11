@@ -6,7 +6,7 @@ import os
 
 from app.database import init_db
 from app.config import settings
-from app.routers import tweets_router, media_router, settings_router, llm_router, engage_router, logs_router
+from app.routers import tweets_router, media_router, settings_router, llm_router, engage_router, logs_router, cookies_router
 from app.services.scheduler import start_scheduler, stop_scheduler
 
 
@@ -43,6 +43,7 @@ app.include_router(settings_router)
 app.include_router(llm_router)
 app.include_router(engage_router)
 app.include_router(logs_router)
+app.include_router(cookies_router)
 
 # 静态文件服务（上传的媒体文件）
 os.makedirs(settings.upload_dir, exist_ok=True)
