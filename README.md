@@ -276,6 +276,178 @@ FRONTEND_PORT=3000
 - [ ] 安全防护：操作间隔随机化（30s-5min）、每日总量上限、模拟人类作息时间
 - [ ] 新建 Automation 管理页面：规则配置、执行日志、安全状态监控
 
+### Phase 7.5: 名人账号监控与评论引流 -- 计划中
+> 目标：在高流量账号下抢占评论区前排，精准触达目标用户
+
+**核心策略：监控自动化 + 执行人工化**
+
+由于 X 平台 2026.2 起限制 API 自动回复（仅允许回复 @提及的推文），纯自动化评论已不可行。推荐方案是自动监控+人工评论，既保证响应速度又规避封号风险。
+
+#### 技术实现
+
+**监控层（自动化）**
+- [ ] 新建 MonitoredAccount 模型（账号列表、监控优先级、轮询间隔）
+- [ ] 使用 twikit `get_user_tweets()` 或 SocialData API 轮询目标账号
+- [ ] 每 2-5 分钟检查新推文，使用 `since_id` 增量获取
+- [ ] 成本估算：监控 50 个账号，X API 约 $10-50/天，SocialData API 约 $2-10/天
+
+**通知层（自动化）**
+- [ ] Telegram Bot 即时推送新推文通知
+- [ ] 通知内容：推文链接、内容摘要、作者信息、发布时间
+- [ ] 推送优先级：第一优先级账号（CZ、Vitalik）立即推送，其他分级推送
+
+**执行层（人工）**
+- [ ] 人工判断是否值得评论（15 分钟黄金窗口）
+- [ ] 人工撰写有针对性的评论（可参考 AI 生成的草稿）
+- [ ] 人工发布评论（通过 Web 界面或 Twitter 客户端）
+
+#### 推荐监控账号
+
+**第一优先级（每 2 分钟监控）**
+- `@binance` (1000万+粉丝)
+- `@cz_binance` (970万+粉丝)
+- `@VitalikButerin` (510万+粉丝)
+
+**第二优先级（每 5 分钟监控）**
+- `@coinbase`、`@okx`、`@Bybit_Official`
+- `@saylor` (Michael Saylor)
+
+**第三优先级（每 15 分钟监控）**
+- `@krakenfx`、`@gate_io`
+- `@CryptoHayes` (Arthur Hayes)
+- `@RaoulGMI` (Raoul Pal)
+
+#### 评论策略
+
+**抢前排技巧**
+- 推文发布后 15 分钟内评论（X 算法黄金窗口）
+- 账号需要有真实互动历史（新账号进前排概率极低）
+- 评论前两行必须有价值（折叠前可见）
+
+**高互动评论结构**
+```
+[相关数据/观点] + [个人见解] + [引导互动的问题]
+```
+
+**示例**
+- 差的评论："Check out our trading bot! Link in bio"
+- 好的评论："This fee structure mirrors what Coinbase did in Q3 2024 — that move drove a 40% volume increase. Are you targeting the same institutional segment here?"
+
+**避免 Spam 判定**
+- 每天评论不超过 50 条（新账号 <20 条）
+- 评论间隔不少于 5 分钟
+- 不在同一推文下发多条评论
+- 混合点赞、转发、评论等不同互动类型
+
+#### 风险控制
+
+**重大政策限制（2026.2）**
+- X 平台已限制通过 API 发送的程序化回复
+- 仅允许回复 @提及你或引用你的推文
+- Enterprise 账户不受限制，但成本极高
+
+**封号风险等级**
+| 行为 | 风险 | 后果 |
+|------|------|------|
+| 使用第三方自动化工具批量评论 | 极高 | 永久封禁 |
+| 短时间大量重复评论 | 高 | 临时封禁/影子封禁 |
+| 通过 API 自动回复 | 高 | API 访问被撤销 |
+| 人工快速评论（合理频率） | 低 | 无 |
+
+#### 成本估算
+
+**X API 按量付费（2026.2 起）**
+- 读取推文：$0.005/条
+- 发帖/回复：$0.010/次
+- 监控 50 个账号，每天约 $10-50
+
+**SocialData API（更经济）**
+- 读取推文：$0.0002/条（是 X API 的 1/25）
+- 监控 50 个账号，每天约 $2-10
+
+**推荐方案**
+- 使用 SocialData API 监控（成本低）
+- 通过 twikit 发布评论（免费，但需控制频率）
+- Telegram Bot 通知（免费）
+
+#### 数据模型设计
+
+```python
+class MonitoredAccount(Base):
+    id: int
+    username: str              # Twitter 用户名
+    user_id: str              # Twitter 用户 ID
+    priority: int             # 优先级（1-3）
+    poll_interval: int        # 轮询间隔（秒）
+    last_tweet_id: str        # 最后一条推文 ID（用于增量获取）
+    last_checked_at: datetime # 最后检查时间
+    is_active: bool           # 是否启用监控
+
+class MonitorNotification(Base):
+    id: int
+    account_id: int           # 关联的监控账号
+    tweet_id: str             # 推文 ID
+    tweet_text: str           # 推文内容
+    tweet_url: str            # 推文链接
+    author_name: str          # 作者名称
+    created_at: datetime      # 推文发布时间
+    notified_at: datetime     # 通知发送时间
+    is_commented: bool        # 是否已评论
+    comment_text: str         # 评论内容（如果已评论）
+```
+
+#### 前端界面设计
+
+**账号监控管理页面**
+- 监控账号列表（添加/删除/编辑）
+- 优先级设置（1-3 级）
+- 轮询间隔配置
+- 启用/禁用开关
+
+**推文通知列表**
+- 实时显示新推文通知
+- 推文内容预览
+- 一键跳转到 Twitter
+- AI 生成评论草稿（可选）
+- 标记已评论状态
+
+**数据统计**
+- 监控账号数量
+- 今日新推文数量
+- 今日评论数量
+- 评论互动数据（点赞/回复数）
+
+#### 实施优先级
+
+1. **Phase 1（1-2 天）**：监控层实现
+   - MonitoredAccount 模型
+   - twikit `get_user_tweets()` 轮询
+   - 增量获取逻辑（since_id）
+
+2. **Phase 2（1 天）**：通知层实现
+   - Telegram Bot 集成
+   - 推文通知推送
+   - 通知历史记录
+
+3. **Phase 3（2-3 天）**：前端界面
+   - 账号管理页面
+   - 通知列表页面
+   - 数据统计看板
+
+4. **Phase 4（可选）**：AI 辅助
+   - 评论草稿生成
+   - 评论质量评分
+   - 最佳评论时机提示
+
+#### 参考资料
+
+- [X API 定价变化](https://pricetimeline.com/data/price/x-api)
+- [X 限制 API 程序化回复（2026.2）](https://roboin.io/article/en/2026/02/24/x-limits-api-based-automated-replies-to-combat-engagement-farming/)
+- [早期互动窗口策略](https://siftfeed.com/guides/early-engagement-windows-x)
+- [Twitter 自动化安全指南 2026](https://www.contagent.ai/blog/twitter-automation-safe)
+- [加密货币 KOL 列表](https://awisee.com/blog/top-crypto-x-accounts/)
+- [SocialData API 定价](https://docs.socialdata.tools/getting-started/pricing)
+
 ### Phase 8: 内容策略优化 -- 计划中
 > 目标：让自动生成的内容直接服务于 HAA 获客转化
 
