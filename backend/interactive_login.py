@@ -22,7 +22,7 @@ async def interactive_login(username=None, email=None, password=None, proxy=None
     if not auto_mode:
         # 如果没有传入参数，则交互式获取
         if not username:
-            username = input("请输入 Twitter 用户名 (如 @LinRui0203): ").strip()
+            username = input("请输入 Twitter 用户名 (如 @your_username): ").strip()
         if not email:
             email = input("请输入 Twitter 邮箱: ").strip()
         if not password:

@@ -13,7 +13,7 @@ vim .env
 
 ```bash
 # 替换为你的真实信息
-TWITTER_USERNAME=你的Twitter用户名（如 @LinRui0203，不需要@符号）
+TWITTER_USERNAME=你的Twitter用户名（如 @your_username，不需要@符号）
 TWITTER_EMAIL=你的Twitter邮箱
 TWITTER_PASSWORD=你的Twitter密码
 
