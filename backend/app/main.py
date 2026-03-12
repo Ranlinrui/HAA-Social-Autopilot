@@ -8,16 +8,17 @@ from app.database import init_db
 from app.config import settings
 from app.routers import tweets_router, media_router, settings_router, llm_router, engage_router, monitor_router, logs_router, cookies_router
 from app.services.scheduler import start_scheduler, stop_scheduler
+from app.services.monitor_service import monitor_service
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 启动时
     await init_db()
     start_scheduler()
+    await monitor_service.start()
     yield
-    # 关闭时
     stop_scheduler()
+    await monitor_service.stop()
 
 
 app = FastAPI(
