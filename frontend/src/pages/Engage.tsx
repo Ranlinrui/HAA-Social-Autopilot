@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Search, Send, Loader2, ExternalLink, RefreshCw, CheckCircle2 } from 'lucide-react'
+import { Search, Send, Loader2, ExternalLink, RefreshCw, CheckCircle2, Repeat2 } from 'lucide-react'
 import api from '@/services/api'
 
 interface SearchResult {
@@ -40,6 +40,7 @@ export default function Engage() {
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({})
   const [generating, setGenerating] = useState<Record<string, boolean>>({})
   const [sending, setSending] = useState<Record<string, boolean>>({})
+  const [quoting, setQuoting] = useState<Record<string, boolean>>({})
   const [sent, setSent] = useState<Record<string, boolean>>({})
   const [repliedBefore, setRepliedBefore] = useState<Set<string>>(new Set())
   const [replyErrors, setReplyErrors] = useState<Record<string, string>>({})
@@ -102,6 +103,23 @@ export default function Engage() {
     }
   }
 
+  async function handleQuote(tweet: SearchResult) {
+    const content = replyDrafts[tweet.id]
+    if (!content?.trim()) return
+    setQuoting(prev => ({ ...prev, [tweet.id]: true }))
+    setReplyErrors(prev => ({ ...prev, [tweet.id]: '' }))
+    try {
+      await api.post('/engage/quote', { tweet_url: tweet.url, content })
+      setSent(prev => ({ ...prev, [tweet.id]: true }))
+      setRepliedBefore(prev => new Set([...prev, tweet.id]))
+      setReplyDrafts(prev => ({ ...prev, [tweet.id]: '' }))
+    } catch (e: any) {
+      setReplyErrors(prev => ({ ...prev, [tweet.id]: e.response?.data?.detail || '引用转发失败' }))
+    } finally {
+      setQuoting(prev => ({ ...prev, [tweet.id]: false }))
+    }
+  }
+
   return (
     <div className="p-6 max-w-4xl mx-auto space-y-6">
       <div>
@@ -158,12 +176,14 @@ export default function Engage() {
               draft={replyDrafts[tweet.id] || ''}
               generating={generating[tweet.id] || false}
               sending={sending[tweet.id] || false}
+              quoting={quoting[tweet.id] || false}
               sent={sent[tweet.id] || false}
               repliedBefore={repliedBefore.has(tweet.id)}
               error={replyErrors[tweet.id] || ''}
               onDraftChange={val => setReplyDrafts(prev => ({ ...prev, [tweet.id]: val }))}
               onGenerate={() => handleGenerateReply(tweet)}
               onSend={() => handleSendReply(tweet)}
+              onQuote={() => handleQuote(tweet)}
             />
           ))}
         </div>
@@ -177,15 +197,17 @@ interface TweetCardProps {
   draft: string
   generating: boolean
   sending: boolean
+  quoting: boolean
   sent: boolean
   repliedBefore: boolean
   error: string
   onDraftChange: (val: string) => void
   onGenerate: () => void
   onSend: () => void
+  onQuote: () => void
 }
 
-function TweetCard({ tweet, draft, generating, sending, sent, repliedBefore, error, onDraftChange, onGenerate, onSend }: TweetCardProps) {
+function TweetCard({ tweet, draft, generating, sending, quoting, sent, repliedBefore, error, onDraftChange, onGenerate, onSend, onQuote }: TweetCardProps) {
   const charCount = draft.length
 
   return (
@@ -219,14 +241,14 @@ function TweetCard({ tweet, draft, generating, sending, sent, repliedBefore, err
       </div>
 
       {sent ? (
-        <div className="p-2 rounded bg-green-50 text-green-700 text-sm">已发送回复</div>
+        <div className="p-2 rounded bg-green-50 text-green-700 text-sm">已发送</div>
       ) : (
         <div className="space-y-2">
           <div className="relative">
             <textarea
               className="w-full px-3 py-2 text-sm rounded-md border bg-background focus:outline-none focus:ring-2 focus:ring-primary resize-none"
               rows={3}
-              placeholder="点击「AI 生成」获取回复草稿，或直接输入..."
+              placeholder="点击「AI 生成」获取草稿，或直接输入..."
               value={draft}
               onChange={e => onDraftChange(e.target.value)}
               maxLength={280}
@@ -236,7 +258,7 @@ function TweetCard({ tweet, draft, generating, sending, sent, repliedBefore, err
             </span>
           </div>
           {error && <p className="text-xs text-destructive">{error}</p>}
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap">
             <button
               onClick={onGenerate}
               disabled={generating}
@@ -251,7 +273,15 @@ function TweetCard({ tweet, draft, generating, sending, sent, repliedBefore, err
               className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50"
             >
               {sending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
-              发送回复
+              回复
+            </button>
+            <button
+              onClick={onQuote}
+              disabled={quoting || !draft.trim()}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm border border-primary text-primary rounded-md hover:bg-primary/10 disabled:opacity-50"
+            >
+              {quoting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Repeat2 className="h-3.5 w-3.5" />}
+              引用转发
             </button>
           </div>
         </div>
