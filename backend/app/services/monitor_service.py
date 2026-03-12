@@ -1,43 +1,118 @@
 """
 Twitter Account Monitoring Service
 
-Monitors specified Twitter accounts for new tweets and sends notifications.
-Uses twikit to fetch user tweets with incremental ID comparison.
+Monitors specified Twitter accounts for new tweets.
+When auto_engage is enabled on an account, new tweets are queued for
+automatic reply/retweet after a configurable delay (default 90s).
 """
 
 import asyncio
 import logging
+import random
 from datetime import datetime, timezone
-from typing import List, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.monitor import MonitoredAccount, MonitorNotification
-from app.services.twitter_api import get_twitter_client
+from app.services.twitter_api import get_twitter_client, reply_tweet, retweet_tweet
 
 logger = logging.getLogger(__name__)
 
 
+def _human_like_delay(base_delay: int) -> int:
+    """
+    Generate a human-like delay to avoid bot detection patterns.
+
+    Strategy:
+    - Apply a random multiplier (0.6x to 2.0x) to the base delay
+    - Add gaussian noise for natural variation
+    - Occasionally add a longer pause (simulating distraction)
+    - Clamp to [30, 600] seconds
+    """
+    # Random multiplier: most of the time near 1x, occasionally much longer
+    multiplier = random.triangular(0.6, 2.0, 1.0)
+    delay = base_delay * multiplier
+
+    # Add gaussian noise (std = 20% of base)
+    noise = random.gauss(0, base_delay * 0.2)
+    delay += noise
+
+    # 15% chance of a longer "distracted human" pause (extra 60-180s)
+    if random.random() < 0.15:
+        delay += random.uniform(60, 180)
+
+    return max(30, min(600, int(delay)))
+
+
+async def _generate_reply_content(tweet_text: str, author_username: str) -> str:
+    """Generate reply content using the same prompt logic as engage router."""
+    from app.services.llm_service import generate_tweet_content
+
+    has_chinese = any('\u4e00' <= c <= '\u9fff' for c in tweet_text)
+    language = "zh" if has_chinese else "en"
+
+    haa_context = """
+Hyper Alpha Arena (akooi.com) - let AI models auto-trade perpetual contracts for you.
+Pick an AI model (GPT-4o, Claude, DeepSeek), write your strategy in plain language,
+and the AI executes trades on Hyperliquid or Binance Futures automatically.
+Inspired by the Alpha Arena experiment where 6 AIs each traded $10,000 real money on
+Hyperliquid - DeepSeek beat GPT-4. Built-in risk controls: position size, stop-loss,
+max drawdown. Backtest before going live.
+"""
+
+    if language == "zh":
+        prompt = f"""你是一个真实的加密货币交易者，在社交媒体上分享经验和见解。
+
+为以下推文写一条真诚有价值的评论。语气自然随和，像朋友聊天，有自己的观点，不要只是附和。
+如果内容与交易/AI相关，可以自然提及 Hyper Alpha Arena，用"你可以试试"这类推荐语气而非自述。
+不要缩写为 HAA。不用机器人表情（🤖💡🚀✨），可用😊👍🤔😅🙄。严格控制在 230 字符内，句子完整。
+
+原推文作者：@{author_username}
+原推文内容：{tweet_text}
+
+平台信息（仅在相关时提及）：{haa_context}
+
+直接输出评论内容，不要任何说明。"""
+    else:
+        prompt = f"""You are a real crypto trader sharing insights on social media.
+
+Write a genuine, valuable reply to this tweet. Be conversational, have your own opinion,
+don't just agree. If trading/AI related, naturally mention Hyper Alpha Arena using
+recommendation language ("you could try") not self-referential ("I use"). Never abbreviate
+to HAA. Avoid robotic emojis. Strictly under 230 characters, complete sentence.
+
+Original tweet by @{author_username}: {tweet_text}
+
+Platform context (mention only if relevant): {haa_context}
+
+Output only the reply content."""
+
+    content, _ = await generate_tweet_content(
+        topic=prompt,
+        language=language,
+        max_length=250,
+        template_prompt="{topic}"
+    )
+    return content
+
+
 class TwitterMonitorService:
-    """Service for monitoring Twitter accounts"""
+    """Service for monitoring Twitter accounts and auto-engaging with new tweets."""
 
     def __init__(self):
         self.is_running = False
         self.monitor_task = None
 
     async def start(self):
-        """Start the monitoring service"""
         if self.is_running:
             logger.warning("Monitor service already running")
             return
-
         self.is_running = True
         self.monitor_task = asyncio.create_task(self._monitor_loop())
         logger.info("Twitter monitor service started")
 
     async def stop(self):
-        """Stop the monitoring service"""
         self.is_running = False
         if self.monitor_task:
             self.monitor_task.cancel()
@@ -48,7 +123,6 @@ class TwitterMonitorService:
         logger.info("Twitter monitor service stopped")
 
     async def _monitor_loop(self):
-        """Main monitoring loop"""
         while self.is_running:
             try:
                 async for db in get_db():
@@ -56,134 +130,161 @@ class TwitterMonitorService:
                     break
             except Exception as e:
                 logger.error(f"Error in monitor loop: {e}")
-
-            # Wait before next cycle (60 seconds)
-            await asyncio.sleep(60)
+            await asyncio.sleep(30)
 
     async def _check_all_accounts(self, db: AsyncSession):
-        """Check all active monitored accounts"""
-        # Get all active accounts
         result = await db.execute(
             select(MonitoredAccount).where(MonitoredAccount.is_active == True)
         )
         accounts = result.scalars().all()
-
         if not accounts:
             return
 
-        # Calculate interval per account to spread requests
-        interval_per_account = 60 / len(accounts) if len(accounts) > 0 else 60
+        interval_per_account = max(5, 30 / len(accounts))
 
         for account in accounts:
             try:
-                # Check if it's time to poll this account based on priority
                 if not self._should_check_account(account):
                     continue
-
                 await self._check_account(db, account)
-
-                # Update last checked time
                 account.last_checked_at = datetime.now(timezone.utc)
                 await db.commit()
-
             except Exception as e:
                 logger.error(f"Error checking account @{account.username}: {e}")
-
-            # Spread requests evenly
             await asyncio.sleep(interval_per_account)
 
     def _should_check_account(self, account: MonitoredAccount) -> bool:
-        """Determine if account should be checked based on priority and last check time"""
         if not account.last_checked_at:
             return True
-
         now = datetime.now(timezone.utc)
-        last_checked = account.last_checked_at
-        # Handle naive datetime from SQLite (no timezone info)
-        if last_checked.tzinfo is None:
-            last_checked = last_checked.replace(tzinfo=timezone.utc)
-        elapsed = (now - last_checked).total_seconds()
-
-        # Priority intervals: 1=120s, 2=300s, 3=900s
-        intervals = {1: 120, 2: 300, 3: 900}
-        required_interval = intervals.get(account.priority, 300)
-
-        return elapsed >= required_interval
+        last = account.last_checked_at
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        elapsed = (now - last).total_seconds()
+        # Priority intervals: 1=60s, 2=180s, 3=600s
+        intervals = {1: 60, 2: 180, 3: 600}
+        return elapsed >= intervals.get(account.priority, 180)
 
     async def _check_account(self, db: AsyncSession, account: MonitoredAccount):
-        """Check a single account for new tweets"""
-        try:
-            client = await get_twitter_client()
+        client = await get_twitter_client()
 
-            # Get user info if we don't have user_id yet
-            if not account.user_id:
-                user = await client.get_user_by_screen_name(account.username)
-                account.user_id = user.id
-                account.display_name = user.name
-                await db.commit()
-
-            # Fetch latest tweets
-            tweets = await client.get_user_tweets(account.user_id, 'Tweets', count=5)
-
-            if not tweets:
-                return
-
-            # Find new tweets (compare with last_tweet_id)
-            new_tweets = []
-            for tweet in tweets:
-                if account.last_tweet_id and tweet.id == account.last_tweet_id:
-                    break
-                new_tweets.append(tweet)
-
-            # Update last_tweet_id to the latest
-            if tweets:
-                account.last_tweet_id = tweets[0].id
-
-            # Create notifications for new tweets
-            for tweet in reversed(new_tweets):  # Process oldest first
-                await self._create_notification(db, account, tweet)
-
-            if new_tweets:
-                logger.info(f"Found {len(new_tweets)} new tweets from @{account.username}")
-
-        except Exception as e:
-            logger.error(f"Error fetching tweets for @{account.username}: {e}")
-            raise
-
-    async def _create_notification(self, db: AsyncSession, account: MonitoredAccount, tweet):
-        """Create a notification for a new tweet"""
-        try:
-            # Check if notification already exists
-            result = await db.execute(
-                select(MonitorNotification).where(MonitorNotification.tweet_id == tweet.id)
-            )
-            existing = result.scalar_one_or_none()
-
-            if existing:
-                return
-
-            # Create notification
-            notification = MonitorNotification(
-                account_id=account.id,
-                tweet_id=tweet.id,
-                tweet_text=tweet.text or tweet.full_text or "",
-                tweet_url=f"https://twitter.com/{account.username}/status/{tweet.id}",
-                author_username=account.username,
-                author_name=account.display_name or account.username,
-                tweet_created_at=tweet.created_at_datetime,
-            )
-
-            db.add(notification)
+        if not account.user_id:
+            user = await client.get_user_by_screen_name(account.username)
+            account.user_id = user.id
+            account.display_name = user.name
             await db.commit()
 
-            logger.info(f"Created notification for tweet {tweet.id} from @{account.username}")
+        tweets = await client.get_user_tweets(account.user_id, 'Tweets', count=5)
+        if not tweets:
+            return
 
-            # TODO: Send Telegram notification here
+        new_tweets = []
+        for tweet in tweets:
+            if account.last_tweet_id and tweet.id == account.last_tweet_id:
+                break
+            new_tweets.append(tweet)
 
-        except Exception as e:
-            logger.error(f"Error creating notification: {e}")
-            await db.rollback()
+        if tweets:
+            account.last_tweet_id = tweets[0].id
+
+        for tweet in reversed(new_tweets):
+            notif = await self._create_notification(db, account, tweet)
+            if notif and account.auto_engage:
+                delay = _human_like_delay(account.engage_delay)
+                asyncio.create_task(
+                    self._auto_engage(notif.id, account.engage_action, delay)
+                )
+                logger.info(
+                    f"Scheduled auto-engage for tweet {tweet.id} from @{account.username} "
+                    f"in {delay}s (action={account.engage_action})"
+                )
+
+        if new_tweets:
+            logger.info(f"Found {len(new_tweets)} new tweets from @{account.username}")
+
+    async def _create_notification(
+        self, db: AsyncSession, account: MonitoredAccount, tweet
+    ):
+        result = await db.execute(
+            select(MonitorNotification).where(MonitorNotification.tweet_id == tweet.id)
+        )
+        if result.scalar_one_or_none():
+            return None
+
+        notif = MonitorNotification(
+            account_id=account.id,
+            tweet_id=tweet.id,
+            tweet_text=tweet.text or getattr(tweet, 'full_text', '') or "",
+            tweet_url=f"https://twitter.com/{account.username}/status/{tweet.id}",
+            author_username=account.username,
+            author_name=account.display_name or account.username,
+            tweet_created_at=tweet.created_at_datetime,
+            auto_engage_status="scheduled" if account.auto_engage else "skipped",
+        )
+        db.add(notif)
+        await db.commit()
+        await db.refresh(notif)
+        logger.info(f"Created notification for tweet {tweet.id} from @{account.username}")
+        return notif
+
+    async def _auto_engage(self, notification_id: int, action: str, delay: int):
+        """Wait for delay then execute reply/retweet. Runs as a background task."""
+        await asyncio.sleep(delay)
+
+        async for db in get_db():
+            try:
+                result = await db.execute(
+                    select(MonitorNotification).where(MonitorNotification.id == notification_id)
+                )
+                notif = result.scalar_one_or_none()
+                if not notif:
+                    return
+                # Skip if already manually handled
+                if notif.is_commented:
+                    notif.auto_engage_status = "skipped"
+                    await db.commit()
+                    return
+
+                if action in ("reply", "both"):
+                    content = await _generate_reply_content(
+                        notif.tweet_text, notif.author_username
+                    )
+                    reply_id = await reply_tweet(notif.tweet_id, content)
+                    notif.is_commented = True
+                    notif.comment_text = content
+                    notif.commented_at = datetime.now(timezone.utc)
+                    logger.info(
+                        f"Auto-replied to tweet {notif.tweet_id} "
+                        f"from @{notif.author_username}, reply_id={reply_id}"
+                    )
+
+                if action in ("retweet", "both"):
+                    await retweet_tweet(notif.tweet_id)
+                    if not notif.is_commented:
+                        notif.is_commented = True
+                        notif.comment_text = "[retweet]"
+                        notif.commented_at = datetime.now(timezone.utc)
+                    logger.info(
+                        f"Auto-retweeted tweet {notif.tweet_id} from @{notif.author_username}"
+                    )
+
+                notif.auto_engage_status = "done"
+                await db.commit()
+
+            except Exception as e:
+                logger.error(f"Auto-engage failed for notification {notification_id}: {e}")
+                try:
+                    result = await db.execute(
+                        select(MonitorNotification).where(MonitorNotification.id == notification_id)
+                    )
+                    notif = result.scalar_one_or_none()
+                    if notif:
+                        notif.auto_engage_status = "failed"
+                        notif.auto_engage_error = str(e)
+                        await db.commit()
+                except Exception:
+                    pass
+            break
 
 
-# Global monitor service instance
 monitor_service = TwitterMonitorService()

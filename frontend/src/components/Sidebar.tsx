@@ -9,6 +9,7 @@ import {
   ChevronRight,
   Twitter,
   MessageCircle,
+  Radio,
 } from 'lucide-react'
 import { useUIStore } from '@/stores'
 import { cn } from '@/lib/utils'
@@ -19,6 +20,7 @@ const navItems = [
   { icon: Calendar, label: '排期日历', path: '/calendar' },
   { icon: Image, label: '素材库', path: '/media' },
   { icon: MessageCircle, label: '互动引流', path: '/engage' },
+  { icon: Radio, label: '账号监控', path: '/monitor' },
   { icon: Settings, label: '系统设置', path: '/settings' },
 ]
 

@@ -1,8 +1,12 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import List, Optional
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
-from app.services.twitter_api import search_tweets, reply_tweet
+from app.database import get_db
+from app.models.engage import EngageReply
+from app.services.twitter_api import search_tweets, reply_tweet, retweet_tweet, quote_tweet
 from app.services.llm_service import generate_tweet_content
 
 router = APIRouter(prefix="/api/engage", tags=["engage"])
@@ -30,10 +34,13 @@ class SearchResult(BaseModel):
 class GenerateReplyRequest(BaseModel):
     tweet_text: str
     author_username: str
+    mode: str = "reply"  # "reply" or "quote"
 
 
 class ReplyRequest(BaseModel):
     content: str
+    tweet_text: Optional[str] = None
+    author_username: Optional[str] = None
 
 
 @router.post("/search", response_model=List[SearchResult])
@@ -42,10 +49,16 @@ async def search_hot_tweets(body: SearchRequest):
         results = await search_tweets(body.query, body.count)
         return results
     except ValueError as e:
-        # Twitter 未登录或配置错误
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"搜索失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+
+@router.get("/replied-ids")
+async def get_replied_ids(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(EngageReply.tweet_id))
+    ids = [row[0] for row in result.fetchall()]
+    return {"ids": ids}
 
 
 @router.post("/generate-reply")
@@ -176,9 +189,42 @@ Output only the reply content, no additional explanation."""
 
 
 @router.post("/reply/{tweet_id}")
-async def post_reply(tweet_id: str, body: ReplyRequest):
+async def post_reply(tweet_id: str, body: ReplyRequest, db: AsyncSession = Depends(get_db)):
     try:
         reply_id = await reply_tweet(tweet_id, body.content)
+        # Record the replied tweet to prevent duplicates
+        record = EngageReply(
+            tweet_id=tweet_id,
+            reply_id=reply_id,
+            tweet_text=body.tweet_text,
+            author_username=body.author_username,
+            reply_content=body.content,
+        )
+        db.add(record)
+        await db.commit()
         return {"success": True, "reply_id": reply_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class QuoteRequest(BaseModel):
+    tweet_url: str
+    content: str
+
+
+@router.post("/quote")
+async def post_quote(body: QuoteRequest):
+    try:
+        tweet_id = await quote_tweet(body.tweet_url, body.content)
+        return {"success": True, "tweet_id": tweet_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/retweet/{tweet_id}")
+async def post_retweet(tweet_id: str):
+    try:
+        await retweet_tweet(tweet_id)
+        return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -387,6 +387,31 @@ class TwitterTwikit:
             raise
 
 
+    async def retweet(self, tweet_id: str) -> str:
+        if not self.client:
+            try:
+                await self.init_client()
+            except Exception as e:
+                raise ValueError("Twitter not logged in") from e
+
+        logger.info("Retweeting tweet %s", tweet_id)
+        await self.client.retweet(tweet_id)
+        logger.info("Retweet successful")
+        return tweet_id
+
+    async def quote_tweet(self, tweet_url: str, content: str) -> str:
+        if not self.client:
+            try:
+                await self.init_client()
+            except Exception as e:
+                raise ValueError("Twitter not logged in") from e
+
+        logger.info("Quote tweeting %s, content length: %d", tweet_url, len(content))
+        tweet = await self.client.create_tweet(text=content, quote_tweet_url=tweet_url)
+        logger.info("Quote tweet successful, id: %s", tweet.id)
+        return tweet.id
+
+
 _twikit_instance: Optional[TwitterTwikit] = None
 
 
@@ -423,3 +448,13 @@ async def search_tweets_twikit(query: str, count: int = 20) -> List[dict]:
 async def reply_tweet_twikit(tweet_id: str, content: str) -> str:
     twitter = await get_twitter_twikit()
     return await twitter.reply_tweet(tweet_id, content)
+
+
+async def retweet_tweet_twikit(tweet_id: str) -> str:
+    twitter = await get_twitter_twikit()
+    return await twitter.retweet(tweet_id)
+
+
+async def quote_tweet_twikit(tweet_url: str, content: str) -> str:
+    twitter = await get_twitter_twikit()
+    return await twitter.quote_tweet(tweet_url, content)

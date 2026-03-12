@@ -1,8 +1,14 @@
 """
-Twitter 发布统一入口
-所有 Twitter 操作通过 twikit 实现
+Twitter unified facade.
+All Twitter operations go through here — routers and services never import twikit directly.
 """
 from app.models.tweet import Tweet
+
+
+async def get_twitter_client():
+    from app.services.twitter_twikit import get_twitter_twikit
+    instance = await get_twitter_twikit()
+    return instance.client
 
 
 async def test_connection() -> str:
@@ -23,3 +29,13 @@ async def search_tweets(query: str, count: int = 20) -> list:
 async def reply_tweet(tweet_id: str, content: str) -> str:
     from app.services.twitter_twikit import reply_tweet_twikit
     return await reply_tweet_twikit(tweet_id, content)
+
+
+async def retweet_tweet(tweet_id: str) -> str:
+    from app.services.twitter_twikit import retweet_tweet_twikit
+    return await retweet_tweet_twikit(tweet_id)
+
+
+async def quote_tweet(tweet_url: str, content: str) -> str:
+    from app.services.twitter_twikit import quote_tweet_twikit
+    return await quote_tweet_twikit(tweet_url, content)

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Search, Send, Loader2, ExternalLink, RefreshCw } from 'lucide-react'
+import { Search, Send, Loader2, ExternalLink, RefreshCw, CheckCircle2 } from 'lucide-react'
 import api from '@/services/api'
 
 interface SearchResult {
@@ -41,6 +41,7 @@ export default function Engage() {
   const [generating, setGenerating] = useState<Record<string, boolean>>({})
   const [sending, setSending] = useState<Record<string, boolean>>({})
   const [sent, setSent] = useState<Record<string, boolean>>({})
+  const [repliedBefore, setRepliedBefore] = useState<Set<string>>(new Set())
   const [replyErrors, setReplyErrors] = useState<Record<string, string>>({})
 
   async function handleSearch(q?: string) {
@@ -51,8 +52,12 @@ export default function Engage() {
     setResults([])
     setSent({})
     try {
-      const res = await api.post('/engage/search', { query: searchQuery, count: 20 })
-      setResults(res.data)
+      const [searchRes, repliedRes] = await Promise.all([
+        api.post('/engage/search', { query: searchQuery, count: 20 }),
+        api.get('/engage/replied-ids'),
+      ])
+      setResults(searchRes.data)
+      setRepliedBefore(new Set(repliedRes.data.ids))
     } catch (e: any) {
       setSearchError(e.response?.data?.detail || '搜索失败，请检查 Twitter 连接')
     } finally {
@@ -76,19 +81,24 @@ export default function Engage() {
     }
   }
 
-  async function handleSendReply(tweetId: string) {
-    const content = replyDrafts[tweetId]
+  async function handleSendReply(tweet: SearchResult) {
+    const content = replyDrafts[tweet.id]
     if (!content?.trim()) return
-    setSending(prev => ({ ...prev, [tweetId]: true }))
-    setReplyErrors(prev => ({ ...prev, [tweetId]: '' }))
+    setSending(prev => ({ ...prev, [tweet.id]: true }))
+    setReplyErrors(prev => ({ ...prev, [tweet.id]: '' }))
     try {
-      await api.post(`/engage/reply/${tweetId}`, { content })
-      setSent(prev => ({ ...prev, [tweetId]: true }))
-      setReplyDrafts(prev => ({ ...prev, [tweetId]: '' }))
+      await api.post(`/engage/reply/${tweet.id}`, {
+        content,
+        tweet_text: tweet.text,
+        author_username: tweet.author_username,
+      })
+      setSent(prev => ({ ...prev, [tweet.id]: true }))
+      setRepliedBefore(prev => new Set([...prev, tweet.id]))
+      setReplyDrafts(prev => ({ ...prev, [tweet.id]: '' }))
     } catch (e: any) {
-      setReplyErrors(prev => ({ ...prev, [tweetId]: e.response?.data?.detail || '发送失败' }))
+      setReplyErrors(prev => ({ ...prev, [tweet.id]: e.response?.data?.detail || '发送失败' }))
     } finally {
-      setSending(prev => ({ ...prev, [tweetId]: false }))
+      setSending(prev => ({ ...prev, [tweet.id]: false }))
     }
   }
 
@@ -149,10 +159,11 @@ export default function Engage() {
               generating={generating[tweet.id] || false}
               sending={sending[tweet.id] || false}
               sent={sent[tweet.id] || false}
+              repliedBefore={repliedBefore.has(tweet.id)}
               error={replyErrors[tweet.id] || ''}
               onDraftChange={val => setReplyDrafts(prev => ({ ...prev, [tweet.id]: val }))}
               onGenerate={() => handleGenerateReply(tweet)}
-              onSend={() => handleSendReply(tweet.id)}
+              onSend={() => handleSendReply(tweet)}
             />
           ))}
         </div>
@@ -167,17 +178,18 @@ interface TweetCardProps {
   generating: boolean
   sending: boolean
   sent: boolean
+  repliedBefore: boolean
   error: string
   onDraftChange: (val: string) => void
   onGenerate: () => void
   onSend: () => void
 }
 
-function TweetCard({ tweet, draft, generating, sending, sent, error, onDraftChange, onGenerate, onSend }: TweetCardProps) {
+function TweetCard({ tweet, draft, generating, sending, sent, repliedBefore, error, onDraftChange, onGenerate, onSend }: TweetCardProps) {
   const charCount = draft.length
 
   return (
-    <div className="border rounded-lg p-4 space-y-3 bg-card">
+    <div className={`border rounded-lg p-4 space-y-3 bg-card ${repliedBefore ? 'opacity-60' : ''}`}>
       <div className="flex items-start justify-between gap-3">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1">
@@ -185,6 +197,12 @@ function TweetCard({ tweet, draft, generating, sending, sent, error, onDraftChan
             <span className="text-muted-foreground text-sm">@{tweet.author_username}</span>
             {tweet.author_verified && (
               <span className="text-xs bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded">蓝V</span>
+            )}
+            {repliedBefore && !sent && (
+              <span className="flex items-center gap-1 text-xs text-green-600">
+                <CheckCircle2 className="h-3.5 w-3.5" />
+                已回复过
+              </span>
             )}
           </div>
           <p className="text-sm leading-relaxed">{tweet.text}</p>

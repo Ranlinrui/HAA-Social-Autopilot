@@ -6,6 +6,7 @@ import CalendarPage from '@/pages/Calendar'
 import Media from '@/pages/Media'
 import Settings from '@/pages/Settings'
 import Engage from '@/pages/Engage'
+import Monitor from '@/pages/Monitor'
 
 export default function App() {
   return (
@@ -17,6 +18,7 @@ export default function App() {
           <Route path="/calendar" element={<CalendarPage />} />
           <Route path="/media" element={<Media />} />
           <Route path="/engage" element={<Engage />} />
+          <Route path="/monitor" element={<Monitor />} />
           <Route path="/settings" element={<Settings />} />
         </Route>
       </Routes>

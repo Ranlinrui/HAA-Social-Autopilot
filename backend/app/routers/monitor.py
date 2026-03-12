@@ -26,10 +26,19 @@ class MonitoredAccountResponse(BaseModel):
     last_tweet_id: Optional[str]
     last_checked_at: Optional[datetime]
     is_active: bool
+    auto_engage: bool
+    engage_action: str
+    engage_delay: int
     created_at: datetime
 
     class Config:
         from_attributes = True
+
+
+class AutoEngageConfig(BaseModel):
+    auto_engage: bool
+    engage_action: str = "reply"   # "reply", "retweet", "both"
+    engage_delay: int = 90         # seconds, 30-300
 
 
 class MonitorNotificationResponse(BaseModel):
@@ -243,6 +252,30 @@ async def get_stats(db: AsyncSession = Depends(get_db)):
         "today_notifications": today_notifications,
         "monitor_running": monitor_service.is_running
     }
+
+
+@router.patch("/accounts/{account_id}/auto-engage")
+async def update_auto_engage(
+    account_id: int,
+    config: AutoEngageConfig,
+    db: AsyncSession = Depends(get_db)
+):
+    """Update auto-engage configuration for an account"""
+    result = await db.execute(
+        select(MonitoredAccount).where(MonitoredAccount.id == account_id)
+    )
+    account = result.scalar_one_or_none()
+
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    account.auto_engage = config.auto_engage
+    account.engage_action = config.engage_action
+    account.engage_delay = max(30, min(300, config.engage_delay))
+    await db.commit()
+    await db.refresh(account)
+
+    return account
 
 
 @router.post("/start")

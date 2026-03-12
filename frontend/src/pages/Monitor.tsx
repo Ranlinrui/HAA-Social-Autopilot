@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Plus, Trash2, Power, PowerOff, Bell, MessageSquare, TrendingUp, RefreshCw, Send, Loader2, ExternalLink, Repeat2 } from 'lucide-react'
+import { Plus, Trash2, Power, PowerOff, Bell, MessageSquare, TrendingUp, RefreshCw, Send, Loader2, ExternalLink, Repeat2, Bot, Settings } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -15,6 +15,9 @@ interface MonitoredAccount {
   last_tweet_id?: string
   last_checked_at?: string
   is_active: boolean
+  auto_engage: boolean
+  engage_action: string
+  engage_delay: number
   created_at: string
 }
 
@@ -31,6 +34,8 @@ interface Notification {
   is_commented: boolean
   comment_text?: string
   commented_at?: string
+  auto_engage_status?: string
+  auto_engage_error?: string
 }
 
 interface Stats {
@@ -51,6 +56,11 @@ export default function Monitor() {
   const [newPriority, setNewPriority] = useState(2)
   const [loading, setLoading] = useState(true)
   const [adding, setAdding] = useState(false)
+
+  // Auto-engage config panel state per account
+  const [engagePanel, setEngagePanel] = useState<Record<number, boolean>>({})
+  const [engageConfig, setEngageConfig] = useState<Record<number, { auto_engage: boolean; engage_action: string; engage_delay: number }>>({})
+  const [savingEngage, setSavingEngage] = useState<Record<number, boolean>>({})
 
   // AI reply states
   const [replyDrafts, setReplyDrafts] = useState<Record<number, string>>({})
@@ -78,6 +88,12 @@ export default function Monitor() {
       setAccounts(accountsRes.data)
       setNotifications(notificationsRes.data)
       setStats(statsRes.data)
+      // Initialize engage config from loaded accounts
+      const configs: Record<number, { auto_engage: boolean; engage_action: string; engage_delay: number }> = {}
+      for (const acc of accountsRes.data) {
+        configs[acc.id] = { auto_engage: acc.auto_engage, engage_action: acc.engage_action, engage_delay: acc.engage_delay }
+      }
+      setEngageConfig(configs)
     } catch (error) {
       console.error('Failed to load data:', error)
     } finally {
@@ -198,6 +214,21 @@ export default function Monitor() {
     }
   }
 
+  const handleSaveEngageConfig = async (accountId: number) => {
+    const config = engageConfig[accountId]
+    if (!config) return
+    setSavingEngage(prev => ({ ...prev, [accountId]: true }))
+    try {
+      await api.patch(`/monitor/accounts/${accountId}/auto-engage`, config)
+      await loadData()
+      setEngagePanel(prev => ({ ...prev, [accountId]: false }))
+    } catch (e: any) {
+      alert(e.response?.data?.detail || 'Failed to save config')
+    } finally {
+      setSavingEngage(prev => ({ ...prev, [accountId]: false }))
+    }
+  }
+
   const getPriorityColor = (priority: number) => {
     const colors = { 1: 'bg-red-100 text-red-800', 2: 'bg-yellow-100 text-yellow-800', 3: 'bg-green-100 text-green-800' }
     return colors[priority as keyof typeof colors] || 'bg-gray-100 text-gray-800'
@@ -314,44 +345,121 @@ export default function Monitor() {
         <CardContent>
           <div className="space-y-3">
             {accounts.map((account) => (
-              <div key={account.id} className="flex items-center justify-between p-3 border rounded-lg">
-                <div className="flex items-center gap-3">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium">@{account.username}</span>
-                      {account.display_name && (
-                        <span className="text-sm text-muted-foreground">({account.display_name})</span>
-                      )}
-                      <Badge className={getPriorityColor(account.priority)}>
-                        优先级 {account.priority}
-                      </Badge>
-                      {!account.is_active && (
-                        <Badge variant="outline">已暂停</Badge>
+              <div key={account.id} className="border rounded-lg overflow-hidden">
+                <div className="flex items-center justify-between p-3">
+                  <div className="flex items-center gap-3">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium">@{account.username}</span>
+                        {account.display_name && (
+                          <span className="text-sm text-muted-foreground">({account.display_name})</span>
+                        )}
+                        <Badge className={getPriorityColor(account.priority)}>
+                          优先级 {account.priority}
+                        </Badge>
+                        {!account.is_active && (
+                          <Badge variant="outline">已暂停</Badge>
+                        )}
+                        {account.auto_engage && (
+                          <Badge className="bg-purple-100 text-purple-800">
+                            <Bot className="h-3 w-3 mr-1" />
+                            自动互动
+                          </Badge>
+                        )}
+                      </div>
+                      {account.last_checked_at && (
+                        <p className="text-xs text-muted-foreground mt-1">
+                          最后检查: {new Date(account.last_checked_at + 'Z').toLocaleString('zh-CN')}
+                        </p>
                       )}
                     </div>
-                    {account.last_checked_at && (
-                      <p className="text-xs text-muted-foreground mt-1">
-                        最后检查: {new Date(account.last_checked_at + 'Z').toLocaleString('zh-CN')}
-                      </p>
-                    )}
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => setEngagePanel(prev => ({ ...prev, [account.id]: !prev[account.id] }))}
+                      title="自动互动设置"
+                    >
+                      <Settings className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => handleToggleAccount(account.id)}
+                    >
+                      {account.is_active ? <PowerOff className="h-4 w-4" /> : <Power className="h-4 w-4" />}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      onClick={() => handleDeleteAccount(account.id)}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
                   </div>
                 </div>
-                <div className="flex gap-2">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => handleToggleAccount(account.id)}
-                  >
-                    {account.is_active ? <PowerOff className="h-4 w-4" /> : <Power className="h-4 w-4" />}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="destructive"
-                    onClick={() => handleDeleteAccount(account.id)}
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </Button>
-                </div>
+
+                {/* Auto-engage config panel */}
+                {engagePanel[account.id] && engageConfig[account.id] && (
+                  <div className="border-t bg-gray-50 p-3 space-y-3">
+                    <p className="text-sm font-medium text-gray-700">自动互动设置</p>
+                    <div className="flex items-center gap-3 flex-wrap">
+                      <label className="flex items-center gap-2 text-sm cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={engageConfig[account.id].auto_engage}
+                          onChange={e => setEngageConfig(prev => ({
+                            ...prev,
+                            [account.id]: { ...prev[account.id], auto_engage: e.target.checked }
+                          }))}
+                          className="w-4 h-4"
+                        />
+                        启用自动互动
+                      </label>
+                      <select
+                        className="px-2 py-1 text-sm border rounded-md bg-white"
+                        value={engageConfig[account.id].engage_action}
+                        onChange={e => setEngageConfig(prev => ({
+                          ...prev,
+                          [account.id]: { ...prev[account.id], engage_action: e.target.value }
+                        }))}
+                        disabled={!engageConfig[account.id].auto_engage}
+                      >
+                        <option value="reply">仅评论</option>
+                        <option value="retweet">仅转发</option>
+                        <option value="both">评论+转发</option>
+                      </select>
+                      <div className="flex items-center gap-1 text-sm">
+                        <span>基础延迟</span>
+                        <input
+                          type="number"
+                          min={30}
+                          max={300}
+                          className="w-16 px-2 py-1 border rounded-md text-sm bg-white"
+                          value={engageConfig[account.id].engage_delay}
+                          onChange={e => setEngageConfig(prev => ({
+                            ...prev,
+                            [account.id]: { ...prev[account.id], engage_delay: Number(e.target.value) }
+                          }))}
+                          disabled={!engageConfig[account.id].auto_engage}
+                        />
+                        <span>秒 (实际随机浮动)</span>
+                      </div>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      检测到新推文后，系统会在基础延迟上随机浮动 ±40%，并有 15% 概率额外等待 1-3 分钟，模拟真人行为。
+                    </p>
+                    <Button
+                      size="sm"
+                      onClick={() => handleSaveEngageConfig(account.id)}
+                      disabled={savingEngage[account.id]}
+                    >
+                      {savingEngage[account.id] ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" /> : null}
+                      保存
+                    </Button>
+                  </div>
+                )}
               </div>
             ))}
             {accounts.length === 0 && (
@@ -380,6 +488,14 @@ export default function Monitor() {
                       </span>
                       {notif.is_commented && (
                         <Badge variant="outline" className="bg-green-50 text-green-700">已评论</Badge>
+                      )}
+                      {!notif.is_commented && notif.auto_engage_status === 'scheduled' && (
+                        <Badge variant="outline" className="bg-purple-50 text-purple-700">
+                          <Bot className="h-3 w-3 mr-1" />自动处理中
+                        </Badge>
+                      )}
+                      {!notif.is_commented && notif.auto_engage_status === 'failed' && (
+                        <Badge variant="outline" className="bg-red-50 text-red-700">自动失败</Badge>
                       )}
                     </div>
                     <p className="text-sm mb-2 leading-relaxed">{notif.tweet_text}</p>
