@@ -126,7 +126,7 @@ export default function Media() {
               <div className="aspect-square relative bg-muted">
                 {media.media_type === 'image' ? (
                   <img
-                    src={`/uploads/${media.filepath.split('/').slice(-2).join('/')}`}
+                    src={`/uploads/${media.filepath.split('/').slice(-3).join('/')}`}
                     alt={media.original_filename}
                     className="w-full h-full object-cover"
                   />
