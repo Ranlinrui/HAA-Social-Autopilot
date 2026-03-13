@@ -1,6 +1,7 @@
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from datetime import datetime
 import asyncio
 
@@ -17,7 +18,9 @@ async def check_scheduled_tweets():
     async with async_session() as db:
         now = datetime.utcnow()
         result = await db.execute(
-            select(Tweet).where(
+            select(Tweet)
+            .options(selectinload(Tweet.media_items))
+            .where(
                 Tweet.status == TweetStatus.SCHEDULED,
                 Tweet.scheduled_at <= now
             )
@@ -51,7 +54,9 @@ async def check_scheduled_tweets():
 async def retry_failed_tweets():
     async with async_session() as db:
         result = await db.execute(
-            select(Tweet).where(
+            select(Tweet)
+            .options(selectinload(Tweet.media_items))
+            .where(
                 Tweet.status == TweetStatus.FAILED,
                 Tweet.retry_count < 3
             )
@@ -93,4 +98,5 @@ def start_scheduler():
 def stop_scheduler():
     scheduler.shutdown()
     logger.info("调度器已停止")
+
 
