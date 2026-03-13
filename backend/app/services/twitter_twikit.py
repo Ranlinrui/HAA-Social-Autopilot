@@ -42,8 +42,7 @@ class TwitterTwikit:
                 _cookies = {k: v for k, v in _raw.items() if k in ('auth_token', 'ct0')}
                 if not _cookies.get('auth_token') or not _cookies.get('ct0'):
                     raise ValueError("Missing auth_token or ct0 in cookie file")
-                self.client.set_cookies(_cookies)
-                self.client.http.headers['x-csrf-token'] = _cookies['ct0']
+                self.client.set_cookies(_cookies, clear_cookies=True)
                 logger.info("从 cookie 文件恢复登录状态成功")
                 # 验证 cookie 是否有效
                 try:
@@ -86,7 +85,6 @@ class TwitterTwikit:
                     auth_info_1=login_username,
                     auth_info_2=login_email,
                     password=login_password,
-                    cookies_file=self.cookies_file,
                     enable_ui_metrics=True
                 )
                 self.client.save_cookies(self.cookies_file)
