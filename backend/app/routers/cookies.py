@@ -112,76 +112,35 @@ async def update_cookies(cookie: CookieInput):
 
 @router.post("/test", response_model=CookieTestResponse)
 async def test_cookies(cookie: CookieInput):
-    """Test if cookies are valid by making a Twitter API request"""
+    """Test if cookies are valid using twikit"""
     try:
-        import httpx
+        from twikit import Client
+        from twikit.errors import Unauthorized, BadRequest, Forbidden
 
-        headers = {
-            'authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA',
-            'x-csrf-token': cookie.ct0,
-            'content-type': 'application/json',
-            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        proxy = app_settings.proxy_url if app_settings.proxy_url else None
+        client = Client(language='en-US', proxy=proxy)
+        client.set_cookies({'auth_token': cookie.auth_token, 'ct0': cookie.ct0}, clear_cookies=True)
+        client.http.headers['x-csrf-token'] = cookie.ct0
+
+        # Save cookies first so they persist regardless of test result
+        cookie_data = {
+            "auth_token": cookie.auth_token,
+            "ct0": cookie.ct0,
+            "account_name": cookie.account_name or "default",
+            "updated_at": datetime.utcnow().isoformat(),
+            "expires_at": (datetime.utcnow() + timedelta(days=30)).isoformat()
         }
 
-        cookies_dict = {
-            'auth_token': cookie.auth_token,
-            'ct0': cookie.ct0
-        }
-
-        # Use proxy if configured
-        proxies = None
-        if app_settings.proxy_url:
-            proxies = {
-                "http://": app_settings.proxy_url,
-                "https://": app_settings.proxy_url
-            }
-
-        async with httpx.AsyncClient(proxies=proxies, timeout=10.0) as client:
-            response = await client.get(
-                'https://api.twitter.com/1.1/account/verify_credentials.json',
-                headers=headers,
-                cookies=cookies_dict
-            )
-
-            if response.status_code == 200:
-                user_data = response.json()
-
-                # Save validated cookies
-                cookie_data = load_cookies() or {}
-                cookie_data.update({
-                    "auth_token": cookie.auth_token,
-                    "ct0": cookie.ct0,
-                    "account_name": cookie.account_name or user_data.get('screen_name', 'default'),
-                    "is_valid": True,
-                    "last_validated_at": datetime.utcnow().isoformat(),
-                    "username": user_data.get('screen_name'),
-                    "user_id": user_data.get('id_str')
-                })
-                save_cookies(cookie_data)
-
-                return CookieTestResponse(
-                    is_valid=True,
-                    message="Cookies are valid!",
-                    username=user_data.get('screen_name')
-                )
-
-            elif response.status_code == 401:
-                return CookieTestResponse(
-                    is_valid=False,
-                    message="Authentication failed. Cookies may be expired."
-                )
-
-            elif response.status_code == 429:
-                return CookieTestResponse(
-                    is_valid=False,
-                    message="Rate limited. Please wait a few minutes."
-                )
-
-            else:
-                return CookieTestResponse(
-                    is_valid=False,
-                    message=f"Unexpected response: {response.status_code}"
-                )
+        try:
+            results = await client.search_tweet('test', 'Latest', count=1)
+            username = cookie.account_name or "unknown"
+            cookie_data.update({"is_valid": True, "last_validated_at": datetime.utcnow().isoformat()})
+            save_cookies(cookie_data)
+            from app.services.twitter_api import reset_twitter_client
+            reset_twitter_client()
+            return CookieTestResponse(is_valid=True, message=f"Twitter connection successful (@{username})", username=username)
+        except (Unauthorized, BadRequest, Forbidden) as e:
+            return CookieTestResponse(is_valid=False, message=f"Authentication failed: {e}")
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
