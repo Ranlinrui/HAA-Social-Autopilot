@@ -1,3 +1,6 @@
+import asyncio
+import random
+
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import List, Optional
@@ -230,3 +233,51 @@ async def post_retweet(tweet_id: str):
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class BatchReplyItem(BaseModel):
+    tweet_id: str
+    content: str
+    tweet_text: Optional[str] = None
+    author_username: Optional[str] = None
+
+
+class BatchReplyRequest(BaseModel):
+    items: List[BatchReplyItem]
+    delay_min: int = 10
+    delay_max: int = 30
+
+
+class BatchReplyResult(BaseModel):
+    tweet_id: str
+    success: bool
+    reply_id: Optional[str] = None
+    error: Optional[str] = None
+
+
+@router.post("/batch-reply", response_model=List[BatchReplyResult])
+async def batch_reply(body: BatchReplyRequest, db: AsyncSession = Depends(get_db)):
+    results: List[BatchReplyResult] = []
+    for i, item in enumerate(body.items):
+        # Random delay between items (skip delay before the first one)
+        if i > 0:
+            delay = random.uniform(body.delay_min, body.delay_max)
+            await asyncio.sleep(delay)
+        try:
+            reply_id = await reply_tweet(item.tweet_id, item.content)
+            # Idempotent write: skip if already recorded
+            existing = await db.execute(select(EngageReply).where(EngageReply.tweet_id == item.tweet_id))
+            if not existing.scalar_one_or_none():
+                record = EngageReply(
+                    tweet_id=item.tweet_id,
+                    reply_id=reply_id,
+                    tweet_text=item.tweet_text,
+                    author_username=item.author_username,
+                    reply_content=item.content,
+                )
+                db.add(record)
+                await db.commit()
+            results.append(BatchReplyResult(tweet_id=item.tweet_id, success=True, reply_id=reply_id))
+        except Exception as e:
+            results.append(BatchReplyResult(tweet_id=item.tweet_id, success=False, error=str(e)))
+    return results

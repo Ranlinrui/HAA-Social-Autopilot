@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Search, Send, Loader2, ExternalLink, RefreshCw, CheckCircle2, Repeat2 } from 'lucide-react'
+import { Search, Send, Loader2, ExternalLink, RefreshCw, CheckCircle2, Repeat2, CheckSquare, Square, Layers } from 'lucide-react'
 import api from '@/services/api'
 
 interface SearchResult {
@@ -45,6 +45,14 @@ export default function Engage() {
   const [repliedBefore, setRepliedBefore] = useState<Set<string>>(new Set())
   const [replyErrors, setReplyErrors] = useState<Record<string, string>>({})
 
+  // Batch mode state
+  const [batchMode, setBatchMode] = useState(false)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [batchGenerating, setBatchGenerating] = useState(false)
+  const [batchSending, setBatchSending] = useState(false)
+  const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null)
+  const [batchResults, setBatchResults] = useState<Record<string, { success: boolean; error?: string }>>({})
+
   async function handleSearch(q?: string) {
     const searchQuery = q ?? query
     if (!searchQuery.trim()) return
@@ -52,6 +60,8 @@ export default function Engage() {
     setSearchError('')
     setResults([])
     setSent({})
+    setSelected(new Set())
+    setBatchResults({})
     try {
       const [searchRes, repliedRes] = await Promise.all([
         api.post('/engage/search', { query: searchQuery, count: 20 }),
@@ -120,6 +130,67 @@ export default function Engage() {
     }
   }
 
+  function toggleSelect(id: string) {
+    setSelected(prev => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+  }
+
+  function toggleSelectAll() {
+    const eligible = results.filter(t => !sent[t.id] && !repliedBefore.has(t.id))
+    if (eligible.every(t => selected.has(t.id))) {
+      setSelected(new Set())
+    } else {
+      setSelected(new Set(eligible.map(t => t.id)))
+    }
+  }
+
+  async function handleBatchGenerate() {
+    const targets = results.filter(t => selected.has(t.id) && !replyDrafts[t.id]?.trim())
+    if (!targets.length) return
+    setBatchGenerating(true)
+    await Promise.all(targets.map(tweet => handleGenerateReply(tweet)))
+    setBatchGenerating(false)
+  }
+
+  async function handleBatchSend() {
+    const targets = results.filter(t => selected.has(t.id) && replyDrafts[t.id]?.trim() && !sent[t.id])
+    if (!targets.length) return
+    setBatchSending(true)
+    setBatchProgress({ done: 0, total: targets.length })
+    setBatchResults({})
+    try {
+      const items = targets.map(t => ({
+        tweet_id: t.id,
+        content: replyDrafts[t.id],
+        tweet_text: t.text,
+        author_username: t.author_username,
+      }))
+      const res = await api.post('/engage/batch-reply', { items, delay_min: 10, delay_max: 30 })
+      const resultList: { tweet_id: string; success: boolean; error?: string }[] = res.data
+      const newBatchResults: Record<string, { success: boolean; error?: string }> = {}
+      resultList.forEach((r, idx) => {
+        newBatchResults[r.tweet_id] = { success: r.success, error: r.error }
+        if (r.success) {
+          setSent(prev => ({ ...prev, [r.tweet_id]: true }))
+          setRepliedBefore(prev => new Set([...prev, r.tweet_id]))
+          setReplyDrafts(prev => ({ ...prev, [r.tweet_id]: '' }))
+        }
+        setBatchProgress({ done: idx + 1, total: targets.length })
+      })
+      setBatchResults(newBatchResults)
+    } catch (e: any) {
+      // Network-level failure
+      targets.forEach(t => {
+        setBatchResults(prev => ({ ...prev, [t.id]: { success: false, error: e.response?.data?.detail || '批量发送失败' } }))
+      })
+    } finally {
+      setBatchSending(false)
+    }
+  }
+
   return (
     <div className="p-6 max-w-4xl mx-auto space-y-6">
       <div>
@@ -165,10 +236,54 @@ export default function Engage() {
         <div className="p-3 rounded-md bg-destructive/10 text-destructive text-sm">{searchError}</div>
       )}
 
-      {/* 搜索结果 */}
+      {/* Search results */}
       {results.length > 0 && (
         <div className="space-y-4">
-          <p className="text-sm text-muted-foreground">找到 {results.length} 条推文</p>
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-muted-foreground">找到 {results.length} 条推文</p>
+            <button
+              onClick={() => { setBatchMode(v => !v); setSelected(new Set()) }}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md border transition-colors ${batchMode ? 'bg-primary text-primary-foreground border-primary' : 'hover:bg-accent'}`}
+            >
+              <Layers className="h-3.5 w-3.5" />
+              批量模式
+            </button>
+          </div>
+
+          {/* Batch action bar */}
+          {batchMode && (
+            <div className="flex flex-wrap items-center gap-2 p-3 rounded-md bg-muted/50 border">
+              <button onClick={toggleSelectAll} className="flex items-center gap-1.5 text-sm hover:text-primary">
+                {results.filter(t => !sent[t.id] && !repliedBefore.has(t.id)).every(t => selected.has(t.id)) && results.filter(t => !sent[t.id] && !repliedBefore.has(t.id)).length > 0
+                  ? <CheckSquare className="h-4 w-4" />
+                  : <Square className="h-4 w-4" />}
+                全选
+              </button>
+              <span className="text-sm text-muted-foreground">已选 {selected.size} 条</span>
+              <button
+                onClick={handleBatchGenerate}
+                disabled={batchGenerating || selected.size === 0}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm border rounded-md hover:bg-accent disabled:opacity-50"
+              >
+                {batchGenerating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                批量生成草稿
+              </button>
+              <button
+                onClick={handleBatchSend}
+                disabled={batchSending || selected.size === 0}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50"
+              >
+                {batchSending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+                批量发送
+              </button>
+              {batchProgress && (
+                <span className="text-sm text-muted-foreground ml-auto">
+                  {batchProgress.done} / {batchProgress.total} 已发送
+                </span>
+              )}
+            </div>
+          )}
+
           {results.map(tweet => (
             <TweetCard
               key={tweet.id}
@@ -180,10 +295,14 @@ export default function Engage() {
               sent={sent[tweet.id] || false}
               repliedBefore={repliedBefore.has(tweet.id)}
               error={replyErrors[tweet.id] || ''}
+              batchMode={batchMode}
+              isSelected={selected.has(tweet.id)}
+              batchResult={batchResults[tweet.id]}
               onDraftChange={val => setReplyDrafts(prev => ({ ...prev, [tweet.id]: val }))}
               onGenerate={() => handleGenerateReply(tweet)}
               onSend={() => handleSendReply(tweet)}
               onQuote={() => handleQuote(tweet)}
+              onToggleSelect={() => toggleSelect(tweet.id)}
             />
           ))}
         </div>
@@ -201,18 +320,27 @@ interface TweetCardProps {
   sent: boolean
   repliedBefore: boolean
   error: string
+  batchMode: boolean
+  isSelected: boolean
+  batchResult?: { success: boolean; error?: string }
   onDraftChange: (val: string) => void
   onGenerate: () => void
   onSend: () => void
   onQuote: () => void
+  onToggleSelect: () => void
 }
 
-function TweetCard({ tweet, draft, generating, sending, quoting, sent, repliedBefore, error, onDraftChange, onGenerate, onSend, onQuote }: TweetCardProps) {
+function TweetCard({ tweet, draft, generating, sending, quoting, sent, repliedBefore, error, batchMode, isSelected, batchResult, onDraftChange, onGenerate, onSend, onQuote, onToggleSelect }: TweetCardProps) {
   const charCount = draft.length
 
   return (
-    <div className={`border rounded-lg p-4 space-y-3 bg-card ${repliedBefore ? 'opacity-60' : ''}`}>
-      <div className="flex items-start justify-between gap-3">
+    <div className={`border rounded-lg p-4 space-y-3 bg-card ${repliedBefore && !sent ? 'opacity-60' : ''} ${batchMode && isSelected ? 'ring-2 ring-primary' : ''}`}>
+      <div className="flex items-start gap-3">
+        {batchMode && (
+          <button onClick={onToggleSelect} className="mt-0.5 flex-shrink-0 text-muted-foreground hover:text-primary">
+            {isSelected ? <CheckSquare className="h-4 w-4 text-primary" /> : <Square className="h-4 w-4" />}
+          </button>
+        )}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1">
             <span className="font-medium text-sm">{tweet.author_name}</span>
@@ -239,6 +367,13 @@ function TweetCard({ tweet, draft, generating, sending, quoting, sent, repliedBe
           <ExternalLink className="h-4 w-4" />
         </a>
       </div>
+
+      {/* Batch result indicator */}
+      {batchResult && (
+        <div className={`p-2 rounded text-sm ${batchResult.success ? 'bg-green-50 text-green-700' : 'bg-destructive/10 text-destructive'}`}>
+          {batchResult.success ? '批量发送成功' : `发送失败: ${batchResult.error}`}
+        </div>
+      )}
 
       {sent ? (
         <div className="p-2 rounded bg-green-50 text-green-700 text-sm">已发送</div>
