@@ -44,15 +44,8 @@ class TwitterTwikit:
                     raise ValueError("Missing auth_token or ct0 in cookie file")
                 self.client.set_cookies(_cookies, clear_cookies=True)
                 self.client.http.headers['x-csrf-token'] = _cookies['ct0']
-                logger.info("从 cookie 文件恢复登录状态成功")
-                # Verify cookie is still valid
-                try:
-                    await self.client.user()
-                    logger.info("Cookie 验证成功")
-                    return
-                except (Unauthorized, BadRequest, Forbidden, NotFound) as e:
-                    logger.warning("Cookie 已过期，将删除并重新登录: %s", e)
-                    os.remove(self.cookies_file)
+                logger.info("从 cookie 文件恢复登录状态成功，跳过验证直接使用")
+                return
             except Exception as e:
                 logger.warning("加载 cookie 失败，将重新登录: %s", e)
                 if os.path.exists(self.cookies_file):
