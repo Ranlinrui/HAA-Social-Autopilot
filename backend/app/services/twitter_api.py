@@ -39,3 +39,8 @@ async def retweet_tweet(tweet_id: str) -> str:
 async def quote_tweet(tweet_url: str, content: str) -> str:
     from app.services.twitter_twikit import quote_tweet_twikit
     return await quote_tweet_twikit(tweet_url, content)
+
+
+def reset_twitter_client():
+    from app.services.twitter_twikit import reset_twitter_twikit
+    reset_twitter_twikit()

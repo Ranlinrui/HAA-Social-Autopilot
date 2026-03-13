@@ -96,6 +96,10 @@ async def update_cookies(cookie: CookieInput):
 
         save_cookies(cookie_data)
 
+        # Reset the in-memory twikit client so it reloads the new cookies
+        from app.services.twitter_api import reset_twitter_client
+        reset_twitter_client()
+
         return {
             "success": True,
             "message": "Cookies saved successfully",

@@ -192,16 +192,18 @@ Output only the reply content, no additional explanation."""
 async def post_reply(tweet_id: str, body: ReplyRequest, db: AsyncSession = Depends(get_db)):
     try:
         reply_id = await reply_tweet(tweet_id, body.content)
-        # Record the replied tweet to prevent duplicates
-        record = EngageReply(
-            tweet_id=tweet_id,
-            reply_id=reply_id,
-            tweet_text=body.tweet_text,
-            author_username=body.author_username,
-            reply_content=body.content,
-        )
-        db.add(record)
-        await db.commit()
+        # Record the replied tweet; skip if already recorded (idempotent)
+        existing = await db.execute(select(EngageReply).where(EngageReply.tweet_id == tweet_id))
+        if not existing.scalar_one_or_none():
+            record = EngageReply(
+                tweet_id=tweet_id,
+                reply_id=reply_id,
+                tweet_text=body.tweet_text,
+                author_username=body.author_username,
+                reply_content=body.content,
+            )
+            db.add(record)
+            await db.commit()
         return {"success": True, "reply_id": reply_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
