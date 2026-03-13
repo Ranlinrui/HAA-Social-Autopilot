@@ -24,7 +24,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="HAA Social Autopilot",
     description="Twitter/X automation tool for HAA project",
-    version="0.1.0",
+    version="0.4.0",
     lifespan=lifespan
 )
 
