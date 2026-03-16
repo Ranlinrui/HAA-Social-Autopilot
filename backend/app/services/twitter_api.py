@@ -44,3 +44,13 @@ async def quote_tweet(tweet_url: str, content: str) -> str:
 def reset_twitter_client():
     from app.services.twitter_twikit import reset_twitter_twikit
     reset_twitter_twikit()
+
+
+async def get_mentions(count: int = 40) -> list:
+    from app.services.twitter_twikit import get_mentions_twikit
+    return await get_mentions_twikit(count)
+
+
+async def get_tweet_by_id(tweet_id: str) -> dict:
+    from app.services.twitter_twikit import get_tweet_by_id_twikit
+    return await get_tweet_by_id_twikit(tweet_id)

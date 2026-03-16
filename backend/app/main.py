@@ -6,9 +6,10 @@ import os
 
 from app.database import init_db
 from app.config import settings
-from app.routers import tweets_router, media_router, settings_router, llm_router, engage_router, monitor_router, logs_router, cookies_router
+from app.routers import tweets_router, media_router, settings_router, llm_router, engage_router, monitor_router, logs_router, cookies_router, conversation_router
 from app.services.scheduler import start_scheduler, stop_scheduler
 from app.services.monitor_service import monitor_service
+from app.services.conversation_service import conversation_service
 
 
 @asynccontextmanager
@@ -16,9 +17,11 @@ async def lifespan(app: FastAPI):
     await init_db()
     start_scheduler()
     await monitor_service.start()
+    await conversation_service.start()
     yield
     stop_scheduler()
     await monitor_service.stop()
+    await conversation_service.stop()
 
 
 app = FastAPI(
@@ -46,6 +49,7 @@ app.include_router(engage_router)
 app.include_router(monitor_router)
 app.include_router(logs_router)
 app.include_router(cookies_router)
+app.include_router(conversation_router)
 
 # 静态文件服务（上传的媒体文件）
 os.makedirs(settings.upload_dir, exist_ok=True)

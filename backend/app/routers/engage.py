@@ -70,114 +70,71 @@ async def generate_reply(body: GenerateReplyRequest):
     has_chinese = any('\u4e00' <= char <= '\u9fff' for char in body.tweet_text)
     language = "zh" if has_chinese else "en"
 
-    # HAA platform features
-    haa_features = """
-Hyper Alpha Arena Key Features:
-- AI-powered quantitative trading strategies
-- Real-time market analysis and prediction
-- Automated risk management systems
-- Multi-strategy portfolio optimization
-- Backtesting and performance analytics
-- Community-driven alpha discovery
-- Low-latency execution infrastructure
-"""
-
     if language == "zh":
-        prompt = f"""你是一个真实的加密货币交易者，在社交媒体上分享经验和见解。
+        prompt = f"""你是一个在 Twitter 上活跃的加密货币玩家，有自己的交易经历和观点，偶尔会提到自己用过的工具。
 
-【任务】为以下推文生成一条真诚、有价值的评论回复。
+原推文：
+@{body.author_username}：{body.tweet_text}
 
-【原推文】
-作者：@{body.author_username}
-内容：{body.tweet_text}
+---
 
-【你可以提及的工具】
-Hyper Alpha Arena 平台功能：
-{haa_features}
+写一条回复。要求：
 
-【核心原则 - 像真人一样回复】
-1. 用中文回复，语气自然随和，像朋友聊天
-2. 不要总是顺着推文说，要有自己的观点和态度：
-   - 如果推文观点片面或有问题，可以礼貌地提出不同看法
-   - 遇到夸张的说法可以适当调侃或质疑
-   - 看到有趣的内容可以玩梗、接梗
-   - 制造一些良性的讨论冲突会更有互动性
-3. 真诚地表达自己的见解或个人经验，不要只是附和
-4. 如果推文内容与交易/AI相关，可以自然地推荐 Hyper Alpha Arena 的功能
-5. 推荐方式要自然：
-   - 用"你可以试试"、"建议用用"、"可以去看看"等推荐型话语
-   - 而不是"我在用"、"我最近用"等自述型话语
-   - 例如："你可以试试 Hyper Alpha Arena 的自动风控" 而不是 "我在用 Hyper Alpha Arena 的自动风控"
-6. 绝对不要缩写 Hyper Alpha Arena 为 HAA，因为其他人可能不知道这是什么
-7. 不要使用机器人式的表情包（如🤖💡🚀✨等），可以用真人常用的表情如😊👍🤔😅🙄等
-8. 不要每次都提及平台，只在真正相关时才自然提起
-9. 避免套路化的开场白，直接切入话题
-10. 用口语化的表达，可以有语气词（哈哈、确实、不过、说实话等）
-11. **严格控制在 230 字符以内，必须完整结束句子**
+**风格**
+- 口语化，像发微博/朋友圈那种随手一写的感觉
+- 有态度，不是复读机，可以赞同、可以反驳、可以调侃、可以共情
+- 短句为主，可以有语气词（哈、确实、emmm、说真的、不过、唉）
+- 偶尔用表情，但不堆砌（😅🙄😂👀 这类真人常用的）
 
-【回复风格示例】
-原推文："AI交易100%盈利！"
-差的回复："很有见地！确实AI交易很强大"
-好的回复："100%盈利？这也太夸张了吧😅 稳定盈利可以，但100%真做不到。你可以试试 Hyper Alpha Arena 先跑回测，看看实际胜率再说"
+**关于产品植入（Hyper Alpha Arena）**
+- 大多数时候不需要提，先把互动做好
+- 只有当推文明确在聊：爆仓/风控/回测/量化策略/AI交易工具，才考虑带一句
+- 带的时候要像随口一提，不是广告词：
+  - 好："回测这块 Hyper Alpha Arena 做得还行，数据挺全的"
+  - 好："我之前也踩过这坑，后来用 Hyper Alpha Arena 跑了下回测才搞清楚"
+  - 差："你可以试试 Hyper Alpha Arena，它有自动风控功能！"
+  - 差："建议用用 Hyper Alpha Arena，功能很强大"
+- 绝对不要每条都提，不要用感叹号推荐，不要列功能点
 
-原推文："量化交易都是骗人的"
-差的回复："不是这样的，量化交易很有用"
-好的回复："不能一棒子打死啊。确实市面上骗子多，但靠谱的量化策略还是有的。建议用用 Hyper Alpha Arena 这种能看回测数据的，至少心里有底"
+**硬规则**
+- 230字符以内，句子要完整
+- 提到产品时必须写完整名字 "Hyper Alpha Arena"，不能缩写成 HAA，不能用"这个平台""这个工具"等模糊代称
+- 不用 🤖💡🚀✨ 这类营销号表情
 
-原推文："今天又爆仓了😭"
-差的回复："要注意风险管理"
-好的回复："兄弟又爆了？🙄 说实话，手动交易真的容易上头。你可以去看看 Hyper Alpha Arena 的自动止损功能，至少不会一把梭哈"
+直接输出回复内容，不要任何说明。"""
 
-【输出】
-直接输出评论内容，不要任何额外说明。"""
     else:
-        prompt = f"""You are a real crypto trader sharing experiences and insights on social media.
+        prompt = f"""You're a crypto trader on Twitter — opinionated, been around, occasionally mention tools you've used.
 
-【Task】Generate a genuine, valuable reply to the following tweet.
+Tweet:
+@{body.author_username}: {body.tweet_text}
 
-【Original Tweet】
-Author: @{body.author_username}
-Content: {body.tweet_text}
+---
 
-【Tools You Can Mention】
-Hyper Alpha Arena Platform Features:
-{haa_features}
+Write a reply. Requirements:
 
-【Core Principles - Reply Like a Real Person】
-1. Reply in English with natural, conversational tone
-2. Don't always agree with the tweet - have your own perspective:
-   - If the tweet is one-sided or problematic, politely offer a different view
-   - Challenge exaggerated claims with skepticism or humor
-   - Join in on memes and jokes when appropriate
-   - Creating constructive debate makes for better engagement
-3. Express genuine insights or personal experience, not just agreement
-4. If the tweet is about trading/AI, naturally recommend Hyper Alpha Arena features
-5. Use recommendation-style language:
-   - Use phrases like "you could try", "might wanna check out", "worth looking at"
-   - Instead of self-referential phrases like "I'm using", "I've been using"
-   - E.g., "You could try Hyper Alpha Arena's auto risk management" instead of "I'm using Hyper Alpha Arena's auto risk management"
-6. Never abbreviate Hyper Alpha Arena to HAA - others might not know what it means
-7. Avoid robotic emojis (like 🤖💡🚀✨), use natural ones like 😊👍🤔😅🙄
-8. Don't mention the platform every time, only when truly relevant
-9. Avoid formulaic openings, get straight to the point
-10. Use colloquial expressions and casual language
-11. **Strictly limit to 230 characters, must end with complete sentence**
+**Tone**
+- Casual, like something you'd actually type on your phone
+- Have a real take — agree, push back, joke around, or just relate
+- Short sentences, natural rhythm, maybe a filler word or two (honestly, ngl, tbh, lol)
+- Emoji if it fits, but don't overdo it (😅🙄😂👀 type, not 🚀💡✨)
 
-【Reply Style Examples】
-Original tweet: "AI trading gives 100% profit!"
-Bad reply: "Great insight! AI trading is indeed powerful"
-Good reply: "100% profit? That's way too optimistic 😅 Consistent profit yes, but 100%? Not realistic. You could try Hyper Alpha Arena to backtest first and see actual win rates"
+**On product mentions (Hyper Alpha Arena)**
+- Most replies don't need it — focus on the conversation first
+- Only bring it up if the tweet is specifically about: liquidation, risk management, backtesting, quant strategies, AI trading tools
+- When you do mention it, make it sound offhand, not like an ad:
+  - Good: "backtesting on Hyper Alpha Arena actually helped me figure this out"
+  - Good: "ngl Hyper Alpha Arena's risk controls saved me from a few dumb trades"
+  - Bad: "You could try Hyper Alpha Arena, it has automated risk management!"
+  - Bad: "I recommend checking out Hyper Alpha Arena for its powerful features"
+- Never mention it in every reply, no exclamation point pitches, no feature lists
 
-Original tweet: "Quant trading is all scam"
-Bad reply: "That's not true, quant trading is useful"
-Good reply: "Can't paint them all with the same brush. Sure, lots of scams out there, but legit quant strategies exist. Might wanna check out Hyper Alpha Arena - at least you can see backtest data"
+**Hard rules**
+- Under 230 characters, complete sentence
+- When mentioning the product, always use the full name "Hyper Alpha Arena" — never abbreviate to HAA, never use vague references like "the platform" or "this tool"
+- No 🤖💡🚀✨ marketing emojis
 
-Original tweet: "Got liquidated again today 😭"
-Bad reply: "You need risk management"
-Good reply: "Again? 🙄 Honestly, manual trading makes it too easy to go full degen. Worth looking at Hyper Alpha Arena's auto stop-loss - at least you can't yolo everything"
-
-【Output】
-Output only the reply content, no additional explanation."""
+Output only the reply, nothing else."""
 
     try:
         content, _ = await generate_tweet_content(
@@ -244,8 +201,8 @@ class BatchReplyItem(BaseModel):
 
 class BatchReplyRequest(BaseModel):
     items: List[BatchReplyItem]
-    delay_min: int = 10
-    delay_max: int = 30
+    delay_min: int = 45
+    delay_max: int = 90
 
 
 class BatchReplyResult(BaseModel):
@@ -253,19 +210,36 @@ class BatchReplyResult(BaseModel):
     success: bool
     reply_id: Optional[str] = None
     error: Optional[str] = None
+    aborted: bool = False  # True if skipped due to rate-limit circuit breaker
 
 
 @router.post("/batch-reply", response_model=List[BatchReplyResult])
 async def batch_reply(body: BatchReplyRequest, db: AsyncSession = Depends(get_db)):
     results: List[BatchReplyResult] = []
+    consecutive_rate_limits = 0  # Track back-to-back 226 errors
+
     for i, item in enumerate(body.items):
-        # Random delay between items (skip delay before the first one)
+        # If two consecutive 226s, abort the rest of the batch
+        if consecutive_rate_limits >= 2:
+            results.append(BatchReplyResult(
+                tweet_id=item.tweet_id, success=False,
+                error="Aborted: rate limit detected, try again later",
+                aborted=True
+            ))
+            continue
+
+        # Random delay between items (skip before the first one)
         if i > 0:
             delay = random.uniform(body.delay_min, body.delay_max)
             await asyncio.sleep(delay)
+
+        # Every 4 items, take a longer break (3-5 min) to mimic human behaviour
+        if i > 0 and i % 4 == 0:
+            await asyncio.sleep(random.uniform(180, 300))
+
         try:
             reply_id = await reply_tweet(item.tweet_id, item.content)
-            # Idempotent write: skip if already recorded
+            consecutive_rate_limits = 0  # Reset on success
             existing = await db.execute(select(EngageReply).where(EngageReply.tweet_id == item.tweet_id))
             if not existing.scalar_one_or_none():
                 record = EngageReply(
@@ -279,5 +253,15 @@ async def batch_reply(body: BatchReplyRequest, db: AsyncSession = Depends(get_db
                 await db.commit()
             results.append(BatchReplyResult(tweet_id=item.tweet_id, success=True, reply_id=reply_id))
         except Exception as e:
-            results.append(BatchReplyResult(tweet_id=item.tweet_id, success=False, error=str(e)))
+            error_str = str(e)
+            # Detect 226 rate-limit / automation detection
+            if "226" in error_str or "automated" in error_str.lower():
+                consecutive_rate_limits += 1
+                # Back off immediately: wait 15 minutes before continuing
+                if consecutive_rate_limits < 2:
+                    await asyncio.sleep(900)
+            else:
+                consecutive_rate_limits = 0
+            results.append(BatchReplyResult(tweet_id=item.tweet_id, success=False, error=error_str))
+
     return results

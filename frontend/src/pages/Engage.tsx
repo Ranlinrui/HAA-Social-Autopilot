@@ -168,7 +168,7 @@ export default function Engage() {
         tweet_text: t.text,
         author_username: t.author_username,
       }))
-      const res = await api.post('/engage/batch-reply', { items, delay_min: 10, delay_max: 30 })
+      const res = await api.post('/engage/batch-reply', { items, delay_min: 45, delay_max: 90 })
       const resultList: { tweet_id: string; success: boolean; error?: string }[] = res.data
       const newBatchResults: Record<string, { success: boolean; error?: string }> = {}
       resultList.forEach((r, idx) => {
@@ -322,7 +322,7 @@ interface TweetCardProps {
   error: string
   batchMode: boolean
   isSelected: boolean
-  batchResult?: { success: boolean; error?: string }
+  batchResult?: { success: boolean; error?: string; aborted?: boolean }
   onDraftChange: (val: string) => void
   onGenerate: () => void
   onSend: () => void
@@ -370,8 +370,8 @@ function TweetCard({ tweet, draft, generating, sending, quoting, sent, repliedBe
 
       {/* Batch result indicator */}
       {batchResult && (
-        <div className={`p-2 rounded text-sm ${batchResult.success ? 'bg-green-50 text-green-700' : 'bg-destructive/10 text-destructive'}`}>
-          {batchResult.success ? '批量发送成功' : `发送失败: ${batchResult.error}`}
+        <div className={`p-2 rounded text-sm ${batchResult.success ? 'bg-green-50 text-green-700' : batchResult.aborted ? 'bg-yellow-50 text-yellow-700' : 'bg-destructive/10 text-destructive'}`}>
+          {batchResult.success ? '批量发送成功' : batchResult.aborted ? '已跳过：检测到频率限制，批次已中止' : `发送失败: ${batchResult.error}`}
         </div>
       )}
 

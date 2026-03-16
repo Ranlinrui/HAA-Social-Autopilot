@@ -411,6 +411,61 @@ class TwitterTwikit:
         logger.info("Quote tweet successful, id: %s", tweet.id)
         return tweet.id
 
+    async def get_mentions(self, count: int = 40) -> List[dict]:
+        """
+        Fetch recent mention notifications (replies to our tweets/comments).
+        Returns a list of dicts with mention details.
+        """
+        if not self.client:
+            try:
+                await self.init_client()
+            except Exception as e:
+                raise ValueError("Twitter not logged in") from e
+
+        logger.info("Fetching mention notifications, count=%d", count)
+        try:
+            notifications = await self.client.get_notifications('Mentions', count=count)
+            mentions = []
+            for notif in notifications:
+                tweet = getattr(notif, 'tweet', None)
+                from_user = getattr(notif, 'from_user', None)
+                if not tweet or not from_user:
+                    continue
+                mentions.append({
+                    "notification_id": notif.id,
+                    "tweet_id": tweet.id,
+                    "tweet_text": tweet.text or "",
+                    "in_reply_to": getattr(tweet, 'in_reply_to', None),
+                    "from_username": from_user.screen_name,
+                    "from_user_id": from_user.id,
+                    "from_user_name": from_user.name,
+                    "created_at": str(getattr(tweet, 'created_at', '')),
+                    "created_at_datetime": getattr(tweet, 'created_at_datetime', None),
+                })
+            logger.info("Fetched %d mention notifications", len(mentions))
+            return mentions
+        except Exception as e:
+            logger.error("Failed to fetch mentions: %s", e)
+            raise
+
+    async def get_tweet_by_id(self, tweet_id: str) -> dict:
+        """Fetch a single tweet by ID, returns basic dict."""
+        if not self.client:
+            try:
+                await self.init_client()
+            except Exception as e:
+                raise ValueError("Twitter not logged in") from e
+
+        tweet = await self.client.get_tweet_by_id(tweet_id)
+        return {
+            "id": tweet.id,
+            "text": tweet.text or "",
+            "in_reply_to": getattr(tweet, 'in_reply_to', None),
+            "author_username": tweet.user.screen_name if tweet.user else "",
+            "author_id": tweet.user.id if tweet.user else "",
+            "created_at": str(getattr(tweet, 'created_at', '')),
+        }
+
 
 _twikit_instance: Optional[TwitterTwikit] = None
 
@@ -458,3 +513,13 @@ async def retweet_tweet_twikit(tweet_id: str) -> str:
 async def quote_tweet_twikit(tweet_url: str, content: str) -> str:
     twitter = await get_twitter_twikit()
     return await twitter.quote_tweet(tweet_url, content)
+
+
+async def get_mentions_twikit(count: int = 40) -> List[dict]:
+    twitter = await get_twitter_twikit()
+    return await twitter.get_mentions(count)
+
+
+async def get_tweet_by_id_twikit(tweet_id: str) -> dict:
+    twitter = await get_twitter_twikit()
+    return await twitter.get_tweet_by_id(tweet_id)

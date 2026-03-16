@@ -10,6 +10,7 @@ import {
   Twitter,
   MessageCircle,
   Radio,
+  MessagesSquare,
 } from 'lucide-react'
 import { useUIStore } from '@/stores'
 import { cn } from '@/lib/utils'
@@ -21,6 +22,7 @@ const navItems = [
   { icon: Image, label: '素材库', path: '/media' },
   { icon: MessageCircle, label: '互动引流', path: '/engage' },
   { icon: Radio, label: '账号监控', path: '/monitor' },
+  { icon: MessagesSquare, label: '对话跟进', path: '/conversations' },
   { icon: Settings, label: '系统设置', path: '/settings' },
 ]
 

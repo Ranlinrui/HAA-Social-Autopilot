@@ -7,6 +7,7 @@ import Media from '@/pages/Media'
 import Settings from '@/pages/Settings'
 import Engage from '@/pages/Engage'
 import Monitor from '@/pages/Monitor'
+import Conversations from '@/pages/Conversations'
 
 export default function App() {
   return (
@@ -19,6 +20,7 @@ export default function App() {
           <Route path="/media" element={<Media />} />
           <Route path="/engage" element={<Engage />} />
           <Route path="/monitor" element={<Monitor />} />
+          <Route path="/conversations" element={<Conversations />} />
           <Route path="/settings" element={<Settings />} />
         </Route>
       </Routes>
