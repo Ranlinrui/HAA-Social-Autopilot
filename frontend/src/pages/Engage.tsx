@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { Search, Send, Loader2, ExternalLink, RefreshCw, CheckCircle2, Repeat2, CheckSquare, Square, Layers } from 'lucide-react'
+import { useState, useRef } from 'react'
+import { Search, Send, Loader2, ExternalLink, RefreshCw, CheckCircle2, Repeat2, CheckSquare, Square, Layers, ImagePlus, X } from 'lucide-react'
 import api from '@/services/api'
 
 interface SearchResult {
@@ -44,6 +44,7 @@ export default function Engage() {
   const [sent, setSent] = useState<Record<string, boolean>>({})
   const [repliedBefore, setRepliedBefore] = useState<Set<string>>(new Set())
   const [replyErrors, setReplyErrors] = useState<Record<string, string>>({})
+  const [quoteImages, setQuoteImages] = useState<Record<string, File[]>>({})
 
   // Batch mode state
   const [batchMode, setBatchMode] = useState(false)
@@ -119,10 +120,22 @@ export default function Engage() {
     setQuoting(prev => ({ ...prev, [tweet.id]: true }))
     setReplyErrors(prev => ({ ...prev, [tweet.id]: '' }))
     try {
-      await api.post('/engage/quote', { tweet_url: tweet.url, content })
+      const images = quoteImages[tweet.id] || []
+      if (images.length > 0) {
+        const formData = new FormData()
+        formData.append('tweet_url', tweet.url)
+        formData.append('content', content)
+        images.forEach(img => formData.append('images', img))
+        await api.post('/engage/quote-with-media', formData, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+        })
+      } else {
+        await api.post('/engage/quote', { tweet_url: tweet.url, content })
+      }
       setSent(prev => ({ ...prev, [tweet.id]: true }))
       setRepliedBefore(prev => new Set([...prev, tweet.id]))
       setReplyDrafts(prev => ({ ...prev, [tweet.id]: '' }))
+      setQuoteImages(prev => ({ ...prev, [tweet.id]: [] }))
     } catch (e: any) {
       setReplyErrors(prev => ({ ...prev, [tweet.id]: e.response?.data?.detail || '引用转发失败' }))
     } finally {
@@ -298,11 +311,13 @@ export default function Engage() {
               batchMode={batchMode}
               isSelected={selected.has(tweet.id)}
               batchResult={batchResults[tweet.id]}
+              quoteImages={quoteImages[tweet.id] || []}
               onDraftChange={val => setReplyDrafts(prev => ({ ...prev, [tweet.id]: val }))}
               onGenerate={() => handleGenerateReply(tweet)}
               onSend={() => handleSendReply(tweet)}
               onQuote={() => handleQuote(tweet)}
               onToggleSelect={() => toggleSelect(tweet.id)}
+              onImagesChange={files => setQuoteImages(prev => ({ ...prev, [tweet.id]: files }))}
             />
           ))}
         </div>
@@ -323,15 +338,29 @@ interface TweetCardProps {
   batchMode: boolean
   isSelected: boolean
   batchResult?: { success: boolean; error?: string; aborted?: boolean }
+  quoteImages: File[]
   onDraftChange: (val: string) => void
   onGenerate: () => void
   onSend: () => void
   onQuote: () => void
   onToggleSelect: () => void
+  onImagesChange: (files: File[]) => void
 }
 
-function TweetCard({ tweet, draft, generating, sending, quoting, sent, repliedBefore, error, batchMode, isSelected, batchResult, onDraftChange, onGenerate, onSend, onQuote, onToggleSelect }: TweetCardProps) {
+function TweetCard({ tweet, draft, generating, sending, quoting, sent, repliedBefore, error, batchMode, isSelected, batchResult, quoteImages, onDraftChange, onGenerate, onSend, onQuote, onToggleSelect, onImagesChange }: TweetCardProps) {
   const charCount = draft.length
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  function handleImageSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files || [])
+    const combined = [...quoteImages, ...files].slice(0, 4)
+    onImagesChange(combined)
+    e.target.value = ''
+  }
+
+  function removeImage(idx: number) {
+    onImagesChange(quoteImages.filter((_, i) => i !== idx))
+  }
 
   return (
     <div className={`border rounded-lg p-4 space-y-3 bg-card ${repliedBefore && !sent ? 'opacity-60' : ''} ${batchMode && isSelected ? 'ring-2 ring-primary' : ''}`}>
@@ -410,15 +439,51 @@ function TweetCard({ tweet, draft, generating, sending, quoting, sent, repliedBe
               {sending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
               回复
             </button>
-            <button
-              onClick={onQuote}
-              disabled={quoting || !draft.trim()}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm border border-primary text-primary rounded-md hover:bg-primary/10 disabled:opacity-50"
-            >
-              {quoting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Repeat2 className="h-3.5 w-3.5" />}
-              引用转发
-            </button>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={onQuote}
+                disabled={quoting || !draft.trim()}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm border border-primary text-primary rounded-md hover:bg-primary/10 disabled:opacity-50"
+              >
+                {quoting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Repeat2 className="h-3.5 w-3.5" />}
+                引用转发{quoteImages.length > 0 ? ` +${quoteImages.length}图` : ''}
+              </button>
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="flex items-center gap-1 px-2 py-1.5 text-sm border rounded-md hover:bg-accent text-muted-foreground"
+                title="添加图片（最多4张）"
+              >
+                <ImagePlus className="h-3.5 w-3.5" />
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                className="hidden"
+                onChange={handleImageSelect}
+              />
+            </div>
           </div>
+          {quoteImages.length > 0 && (
+            <div className="flex gap-2 flex-wrap mt-1">
+              {quoteImages.map((img, idx) => (
+                <div key={idx} className="relative group">
+                  <img
+                    src={URL.createObjectURL(img)}
+                    alt=""
+                    className="h-16 w-16 object-cover rounded border"
+                  />
+                  <button
+                    onClick={() => removeImage(idx)}
+                    className="absolute -top-1.5 -right-1.5 bg-destructive text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>

@@ -36,9 +36,9 @@ async def retweet_tweet(tweet_id: str) -> str:
     return await retweet_tweet_twikit(tweet_id)
 
 
-async def quote_tweet(tweet_url: str, content: str) -> str:
+async def quote_tweet(tweet_url: str, content: str, media_paths: list = []) -> str:
     from app.services.twitter_twikit import quote_tweet_twikit
-    return await quote_tweet_twikit(tweet_url, content)
+    return await quote_tweet_twikit(tweet_url, content, media_paths)
 
 
 def reset_twitter_client():

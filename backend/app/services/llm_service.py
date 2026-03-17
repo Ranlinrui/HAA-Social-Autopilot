@@ -31,6 +31,39 @@ async def get_llm_config(db: Optional[AsyncSession] = None) -> dict:
     return config
 
 
+async def get_product_config() -> dict:
+    """
+    Load product/persona promotion config from the database.
+    Falls back to sensible defaults so the tool works out of the box.
+    Keys stored in the settings table:
+      product_name   - full product name, e.g. "Acme Analytics"
+      product_url    - product URL, e.g. "acme.io"
+      product_desc   - one-line description used in prompts
+      persona_zh     - Chinese persona description for the AI author
+      persona_en     - English persona description for the AI author
+      promo_topics   - comma-separated trigger topics (zh), e.g. "爆仓,风控,回测"
+      promo_topics_en - comma-separated trigger topics (en), e.g. "liquidation,backtesting"
+    """
+    from app.database import get_db
+    try:
+        async for db in get_db():
+            result = await db.execute(select(Setting))
+            db_settings = {s.key: s.value for s in result.scalars().all()}
+            break
+    except Exception:
+        db_settings = {}
+
+    return {
+        "product_name": db_settings.get("product_name") or "Your Product",
+        "product_url": db_settings.get("product_url") or "",
+        "product_desc": db_settings.get("product_desc") or "",
+        "persona_zh": db_settings.get("persona_zh") or "在 Twitter 上活跃的用户，有自己的经历和观点，偶尔会提到自己用过的工具",
+        "persona_en": db_settings.get("persona_en") or "an active Twitter user with your own opinions, occasionally mention tools you've used",
+        "promo_topics": db_settings.get("promo_topics") or "",
+        "promo_topics_en": db_settings.get("promo_topics_en") or "",
+    }
+
+
 def get_llm_client(api_key: str = None, api_base: str = None) -> AsyncOpenAI:
     return AsyncOpenAI(
         api_key=api_key or settings.llm_api_key,

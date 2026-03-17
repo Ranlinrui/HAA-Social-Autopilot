@@ -115,7 +115,7 @@ async def test_cookies(cookie: CookieInput):
     """Test if cookies are valid using twikit"""
     try:
         from twikit import Client
-        from twikit.errors import Unauthorized, BadRequest, Forbidden
+        from twikit.errors import Unauthorized, BadRequest, Forbidden, NotFound
 
         proxy = app_settings.proxy_url if app_settings.proxy_url else None
         client = Client(language='en-US', proxy=proxy)
@@ -132,14 +132,15 @@ async def test_cookies(cookie: CookieInput):
         }
 
         try:
-            results = await client.search_tweet('test', 'Latest', count=1)
+            # Use get_user_by_screen_name as a lightweight auth probe
+            user = await client.get_user_by_screen_name('twitter')
             username = cookie.account_name or "unknown"
             cookie_data.update({"is_valid": True, "last_validated_at": datetime.utcnow().isoformat()})
             save_cookies(cookie_data)
             from app.services.twitter_api import reset_twitter_client
             reset_twitter_client()
             return CookieTestResponse(is_valid=True, message=f"Twitter connection successful (@{username})", username=username)
-        except (Unauthorized, BadRequest, Forbidden) as e:
+        except (Unauthorized, BadRequest, Forbidden, NotFound) as e:
             return CookieTestResponse(is_valid=False, message=f"Authentication failed: {e}")
 
     except Exception as e:

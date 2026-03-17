@@ -1,7 +1,10 @@
 import asyncio
 import random
+import os
+import shutil
+import uuid
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
 from pydantic import BaseModel
 from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -169,6 +172,9 @@ async def post_reply(tweet_id: str, body: ReplyRequest, db: AsyncSession = Depen
         raise HTTPException(status_code=500, detail=str(e))
 
 
+UPLOAD_DIR = "/app/uploads"
+
+
 class QuoteRequest(BaseModel):
     tweet_url: str
     content: str
@@ -181,6 +187,35 @@ async def post_quote(body: QuoteRequest):
         return {"success": True, "tweet_id": tweet_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/quote-with-media")
+async def post_quote_with_media(
+    tweet_url: str = Form(...),
+    content: str = Form(...),
+    images: List[UploadFile] = File(default=[]),
+):
+    saved_paths = []
+    try:
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+        for img in images:
+            ext = os.path.splitext(img.filename or "")[1] or ".jpg"
+            filename = f"quote_{uuid.uuid4().hex}{ext}"
+            filepath = os.path.join(UPLOAD_DIR, filename)
+            with open(filepath, "wb") as f:
+                shutil.copyfileobj(img.file, f)
+            saved_paths.append(filepath)
+
+        tweet_id = await quote_tweet(tweet_url, content, saved_paths)
+        return {"success": True, "tweet_id": tweet_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        for p in saved_paths:
+            try:
+                os.remove(p)
+            except Exception:
+                pass
 
 
 @router.post("/retweet/{tweet_id}")

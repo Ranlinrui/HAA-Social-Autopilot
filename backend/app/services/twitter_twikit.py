@@ -399,15 +399,26 @@ class TwitterTwikit:
         logger.info("Retweet successful")
         return tweet_id
 
-    async def quote_tweet(self, tweet_url: str, content: str) -> str:
+    async def quote_tweet(self, tweet_url: str, content: str, media_paths: List[str] = []) -> str:
         if not self.client:
             try:
                 await self.init_client()
             except Exception as e:
                 raise ValueError("Twitter not logged in") from e
 
-        logger.info("Quote tweeting %s, content length: %d", tweet_url, len(content))
-        tweet = await self.client.create_tweet(text=content, quote_tweet_url=tweet_url)
+        media_ids = []
+        if media_paths:
+            for path in media_paths:
+                media_id = await self.client.upload_media(path, wait_for_completion=True)
+                media_ids.append(media_id)
+                logger.debug("Media uploaded for quote tweet, media_id: %s", media_id)
+
+        logger.info("Quote tweeting %s, content length: %d, media count: %d", tweet_url, len(content), len(media_ids))
+        tweet = await self.client.create_tweet(
+            text=content,
+            quote_tweet_url=tweet_url,
+            media_ids=media_ids if media_ids else None
+        )
         logger.info("Quote tweet successful, id: %s", tweet.id)
         return tweet.id
 
@@ -510,9 +521,9 @@ async def retweet_tweet_twikit(tweet_id: str) -> str:
     return await twitter.retweet(tweet_id)
 
 
-async def quote_tweet_twikit(tweet_url: str, content: str) -> str:
+async def quote_tweet_twikit(tweet_url: str, content: str, media_paths: List[str] = []) -> str:
     twitter = await get_twitter_twikit()
-    return await twitter.quote_tweet(tweet_url, content)
+    return await twitter.quote_tweet(tweet_url, content, media_paths)
 
 
 async def get_mentions_twikit(count: int = 40) -> List[dict]:

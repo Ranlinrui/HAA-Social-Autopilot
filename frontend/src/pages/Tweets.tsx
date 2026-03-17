@@ -141,7 +141,7 @@ export default function Tweets() {
           <CardContent className="space-y-4">
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <Input
-                placeholder="输入主题..."
+                placeholder="粘贴素材内容（AI 推理、交易数据、故事细节...）"
                 value={topic}
                 onChange={(e) => setTopic(e.target.value)}
               />
@@ -150,9 +150,9 @@ export default function Tweets() {
                 value={selectedTemplate}
                 onChange={(e) => setSelectedTemplate(e.target.value)}
               >
-                <option value="">选择模板...</option>
+                <option value="">选择素材类型...</option>
                 {templates.map((t) => (
-                  <option key={t.id} value={t.id}>
+                  <option key={t.id} value={t.id} title={t.description}>
                     {t.name}
                   </option>
                 ))}
