@@ -1,14 +1,14 @@
 import { useEffect, useState } from 'react'
-import { Plus, Trash2, Send, Clock, Sparkles } from 'lucide-react'
+import { Plus, Trash2, Send, Clock, Sparkles, ImagePlus, X, Check } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Textarea } from '@/components/ui/textarea'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
-import { tweetsApi, llmApi } from '@/services/api'
+import { tweetsApi, llmApi, mediaApi } from '@/services/api'
 import { useTweetStore } from '@/stores'
 import { formatDate, getStatusColor, getStatusText } from '@/lib/utils'
-import type { LLMTemplate } from '@/types'
+import type { LLMTemplate, Media } from '@/types'
 
 export default function Tweets() {
   const { tweets, loading, setTweets, setLoading, addTweet, updateTweet, removeTweet } =
@@ -22,6 +22,11 @@ export default function Tweets() {
   const [generating, setGenerating] = useState(false)
   const [scheduling, setScheduling] = useState<number | null>(null)
   const [scheduleTime, setScheduleTime] = useState('')
+
+  // Media picker state
+  const [showMediaPicker, setShowMediaPicker] = useState(false)
+  const [mediaList, setMediaList] = useState<Media[]>([])
+  const [selectedMediaIds, setSelectedMediaIds] = useState<number[]>([])
 
   useEffect(() => {
     loadTweets()
@@ -49,13 +54,32 @@ export default function Tweets() {
     }
   }
 
+  const loadMediaList = async () => {
+    try {
+      const res = await mediaApi.list()
+      setMediaList(res.items)
+    } catch (error) {
+      console.error('Failed to load media:', error)
+    }
+  }
+
+  const toggleMediaSelect = (id: number) => {
+    setSelectedMediaIds(prev =>
+      prev.includes(id) ? prev.filter(x => x !== id) : prev.length < 4 ? [...prev, id] : prev
+    )
+  }
+
   const handleCreate = async () => {
     if (!content.trim()) return
 
     try {
-      const tweet = await tweetsApi.create({ content })
+      const tweet = await tweetsApi.create({
+        content,
+        media_ids: selectedMediaIds.length > 0 ? selectedMediaIds : undefined,
+      })
       addTweet(tweet)
       setContent('')
+      setSelectedMediaIds([])
       setShowCreate(false)
     } catch (error) {
       console.error('Failed to create tweet:', error)
@@ -170,10 +194,83 @@ export default function Tweets() {
               rows={4}
             />
 
+            {/* Selected media preview */}
+            {selectedMediaIds.length > 0 && (
+              <div className="flex gap-2 flex-wrap">
+                {selectedMediaIds.map(id => {
+                  const m = mediaList.find(x => x.id === id)
+                  if (!m) return null
+                  return (
+                    <div key={id} className="relative group">
+                      <img
+                        src={`/uploads/${m.filepath.split('/').slice(-3).join('/')}`}
+                        alt={m.original_filename}
+                        className="h-16 w-16 object-cover rounded border"
+                      />
+                      <button
+                        onClick={() => toggleMediaSelect(id)}
+                        className="absolute -top-1.5 -right-1.5 bg-destructive text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+
+            {/* Media picker panel */}
+            {showMediaPicker && (
+              <div className="border rounded-lg p-3 bg-muted/30 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-medium">选择素材（最多4张）</span>
+                  <button onClick={() => setShowMediaPicker(false)} className="text-muted-foreground hover:text-foreground">
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+                {mediaList.length === 0 ? (
+                  <p className="text-sm text-muted-foreground py-4 text-center">素材库为空，请先到素材库上传图片</p>
+                ) : (
+                  <div className="grid grid-cols-5 gap-2 max-h-48 overflow-y-auto">
+                    {mediaList.filter(m => m.media_type === 'image').map(m => (
+                      <button
+                        key={m.id}
+                        onClick={() => toggleMediaSelect(m.id)}
+                        className={`relative aspect-square rounded border-2 overflow-hidden transition-colors ${
+                          selectedMediaIds.includes(m.id) ? 'border-primary' : 'border-transparent hover:border-muted-foreground'
+                        }`}
+                      >
+                        <img
+                          src={`/uploads/${m.filepath.split('/').slice(-3).join('/')}`}
+                          alt={m.original_filename}
+                          className="w-full h-full object-cover"
+                        />
+                        {selectedMediaIds.includes(m.id) && (
+                          <div className="absolute inset-0 bg-primary/20 flex items-center justify-center">
+                            <Check className="h-5 w-5 text-primary" />
+                          </div>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
             <div className="flex items-center justify-between">
-              <span className="text-sm text-muted-foreground">{content.length}/280</span>
+              <div className="flex items-center gap-3">
+                <span className="text-sm text-muted-foreground">{content.length}/280</span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => { setShowMediaPicker(v => !v); if (!showMediaPicker) loadMediaList() }}
+                >
+                  <ImagePlus className="h-4 w-4 mr-1" />
+                  {selectedMediaIds.length > 0 ? `已选 ${selectedMediaIds.length} 张` : '选择素材'}
+                </Button>
+              </div>
               <div className="flex gap-2">
-                <Button variant="outline" onClick={() => setShowCreate(false)}>
+                <Button variant="outline" onClick={() => { setShowCreate(false); setSelectedMediaIds([]) }}>
                   取消
                 </Button>
                 <Button onClick={handleCreate} disabled={!content.trim() || content.length > 280}>
