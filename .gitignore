@@ -76,3 +76,6 @@ htmlcov/
 # Twitter cookies
 twitter_cookies.json
 data/twitter_cookies.json
+
+# Local-only documentation
+README.local.md

@@ -8,6 +8,7 @@ import asyncio
 from app.database import async_session
 from app.models.tweet import Tweet, TweetStatus
 from app.services.twitter_api import publish_tweet
+from app.services.tweet_guard import apply_publish_guard
 from app.logger import setup_logger
 
 logger = setup_logger("scheduler")
@@ -32,10 +33,12 @@ async def check_scheduled_tweets():
 
         for tweet in tweets:
             tweet.status = TweetStatus.PUBLISHING
+            tweet.error_message = None
             await db.commit()
             logger.info("开始发布排期推文 id=%d，内容: %.50s...", tweet.id, tweet.content)
 
             try:
+                await apply_publish_guard(tweet)
                 twitter_id = await publish_tweet(tweet)
                 tweet.status = TweetStatus.PUBLISHED
                 tweet.published_at = datetime.utcnow()
@@ -44,9 +47,10 @@ async def check_scheduled_tweets():
                 logger.info("排期推文发布成功 id=%d，twitter_id=%s", tweet.id, twitter_id)
             except Exception as e:
                 tweet.status = TweetStatus.FAILED
-                tweet.error_message = str(e)
+                detail = str(e).strip() or repr(e)
+                tweet.error_message = detail
                 tweet.retry_count += 1
-                logger.error("排期推文发布失败 id=%d，错误: %s", tweet.id, e)
+                logger.exception("排期推文发布失败 id=%d，错误: %s", tweet.id, detail)
 
             await db.commit()
 
@@ -68,10 +72,12 @@ async def retry_failed_tweets():
 
         for tweet in tweets:
             tweet.status = TweetStatus.PUBLISHING
+            tweet.error_message = None
             await db.commit()
             logger.info("重试发布推文 id=%d（第 %d 次）", tweet.id, tweet.retry_count + 1)
 
             try:
+                await apply_publish_guard(tweet)
                 twitter_id = await publish_tweet(tweet)
                 tweet.status = TweetStatus.PUBLISHED
                 tweet.published_at = datetime.utcnow()
@@ -80,9 +86,10 @@ async def retry_failed_tweets():
                 logger.info("重试发布成功 id=%d，twitter_id=%s", tweet.id, twitter_id)
             except Exception as e:
                 tweet.status = TweetStatus.FAILED
-                tweet.error_message = str(e)
+                detail = str(e).strip() or repr(e)
+                tweet.error_message = detail
                 tweet.retry_count += 1
-                logger.error("重试发布失败 id=%d（已重试 %d 次），错误: %s", tweet.id, tweet.retry_count, e)
+                logger.exception("重试发布失败 id=%d（已重试 %d 次），错误: %s", tweet.id, tweet.retry_count, detail)
 
             await db.commit()
             await asyncio.sleep(5)

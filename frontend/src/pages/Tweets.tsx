@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Plus, Trash2, Send, Clock, Sparkles, ImagePlus, X, Check } from 'lucide-react'
+import { Plus, Trash2, Send, Clock, Sparkles, ImagePlus, X, Check, Video } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Textarea } from '@/components/ui/textarea'
@@ -9,6 +9,8 @@ import { tweetsApi, llmApi, mediaApi } from '@/services/api'
 import { useTweetStore } from '@/stores'
 import { formatDate, getStatusColor, getStatusText } from '@/lib/utils'
 import type { LLMTemplate, Media } from '@/types'
+
+const getMediaUrl = (filepath: string) => `/uploads/${filepath.split('/').slice(-3).join('/')}`
 
 export default function Tweets() {
   const { tweets, loading, setTweets, setLoading, addTweet, updateTweet, removeTweet } =
@@ -23,10 +25,14 @@ export default function Tweets() {
   const [scheduling, setScheduling] = useState<number | null>(null)
   const [scheduleTime, setScheduleTime] = useState('')
 
-  // Media picker state
   const [showMediaPicker, setShowMediaPicker] = useState(false)
   const [mediaList, setMediaList] = useState<Media[]>([])
   const [selectedMediaIds, setSelectedMediaIds] = useState<number[]>([])
+
+  const selectedMedia = selectedMediaIds
+    .map((id) => mediaList.find((item) => item.id === id))
+    .filter((item): item is Media => Boolean(item))
+  const hasSelectedVideo = selectedMedia.some((item) => item.media_type === 'video')
 
   useEffect(() => {
     loadTweets()
@@ -63,23 +69,52 @@ export default function Tweets() {
     }
   }
 
-  const toggleMediaSelect = (id: number) => {
-    setSelectedMediaIds(prev =>
-      prev.includes(id) ? prev.filter(x => x !== id) : prev.length < 4 ? [...prev, id] : prev
-    )
+  const toggleMediaSelect = (media: Media) => {
+    setSelectedMediaIds((prev) => {
+      if (prev.includes(media.id)) {
+        return prev.filter((id) => id !== media.id)
+      }
+
+      const selectedItems = prev
+        .map((id) => mediaList.find((item) => item.id === id))
+        .filter((item): item is Media => Boolean(item))
+      const alreadyHasVideo = selectedItems.some((item) => item.media_type === 'video')
+
+      if (media.media_type === 'video') {
+        if (selectedItems.length > 0) {
+          alert('视频推文当前仅支持单个视频，已替换掉之前选择的素材。')
+        }
+        return [media.id]
+      }
+
+      if (alreadyHasVideo) {
+        alert('单条推文不能同时混用视频和图片，请先移除已选视频。')
+        return prev
+      }
+
+      if (prev.length >= 4) {
+        alert('图片素材最多选择 4 张。')
+        return prev
+      }
+
+      return [...prev, media.id]
+    })
   }
 
   const handleCreate = async () => {
     if (!content.trim()) return
 
     try {
+      const tweetType = hasSelectedVideo ? 'video' : selectedMediaIds.length > 0 ? 'image' : 'text'
       const tweet = await tweetsApi.create({
         content,
+        tweet_type: tweetType,
         media_ids: selectedMediaIds.length > 0 ? selectedMediaIds : undefined,
       })
       addTweet(tweet)
       setContent('')
       setSelectedMediaIds([])
+      setShowMediaPicker(false)
       setShowCreate(false)
     } catch (error) {
       console.error('Failed to create tweet:', error)
@@ -194,58 +229,84 @@ export default function Tweets() {
               rows={4}
             />
 
-            {/* Selected media preview */}
             {selectedMediaIds.length > 0 && (
               <div className="flex gap-2 flex-wrap">
-                {selectedMediaIds.map(id => {
-                  const m = mediaList.find(x => x.id === id)
-                  if (!m) return null
-                  return (
-                    <div key={id} className="relative group">
+                {selectedMedia.map((media) => (
+                  <div key={media.id} className="relative group">
+                    {media.media_type === 'image' ? (
                       <img
-                        src={`/uploads/${m.filepath.split('/').slice(-3).join('/')}`}
-                        alt={m.original_filename}
+                        src={getMediaUrl(media.filepath)}
+                        alt={media.original_filename}
                         className="h-16 w-16 object-cover rounded border"
                       />
-                      <button
-                        onClick={() => toggleMediaSelect(id)}
-                        className="absolute -top-1.5 -right-1.5 bg-destructive text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
-                      >
-                        <X className="h-3 w-3" />
-                      </button>
-                    </div>
-                  )
-                })}
+                    ) : (
+                      <video
+                        src={getMediaUrl(media.filepath)}
+                        className="h-16 w-16 object-cover rounded border bg-black"
+                        preload="metadata"
+                        muted
+                        playsInline
+                      />
+                    )}
+                    <button
+                      onClick={() => toggleMediaSelect(media)}
+                      className="absolute -top-1.5 -right-1.5 bg-destructive text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                ))}
               </div>
             )}
 
-            {/* Media picker panel */}
             {showMediaPicker && (
               <div className="border rounded-lg p-3 bg-muted/30 space-y-2">
                 <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium">选择素材（最多4张）</span>
-                  <button onClick={() => setShowMediaPicker(false)} className="text-muted-foreground hover:text-foreground">
+                  <span className="text-sm font-medium">选择素材（最多 4 张图片或 1 个视频）</span>
+                  <button
+                    onClick={() => setShowMediaPicker(false)}
+                    className="text-muted-foreground hover:text-foreground"
+                  >
                     <X className="h-4 w-4" />
                   </button>
                 </div>
                 {mediaList.length === 0 ? (
-                  <p className="text-sm text-muted-foreground py-4 text-center">素材库为空，请先到素材库上传图片</p>
+                  <p className="text-sm text-muted-foreground py-4 text-center">
+                    素材库为空，请先到素材库上传图片或视频
+                  </p>
                 ) : (
-                  <div className="grid grid-cols-5 gap-2 max-h-48 overflow-y-auto">
-                    {mediaList.filter(m => m.media_type === 'image').map(m => (
+                  <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-2 max-h-72 overflow-y-auto">
+                    {mediaList.map((media) => (
                       <button
-                        key={m.id}
-                        onClick={() => toggleMediaSelect(m.id)}
+                        key={media.id}
+                        onClick={() => toggleMediaSelect(media)}
                         className={`relative aspect-square rounded border-2 overflow-hidden transition-colors ${
-                          selectedMediaIds.includes(m.id) ? 'border-primary' : 'border-transparent hover:border-muted-foreground'
+                          selectedMediaIds.includes(media.id)
+                            ? 'border-primary'
+                            : 'border-transparent hover:border-muted-foreground'
                         }`}
+                        title={media.original_filename}
                       >
-                        <img
-                          src={`/uploads/${m.filepath.split('/').slice(-3).join('/')}`}
-                          alt={m.original_filename}
-                          className="w-full h-full object-cover"
-                        />
-                        {selectedMediaIds.includes(m.id) && (
+                        {media.media_type === 'image' ? (
+                          <img
+                            src={getMediaUrl(media.filepath)}
+                            alt={media.original_filename}
+                            className="w-full h-full object-cover"
+                          />
+                        ) : (
+                          <video
+                            src={getMediaUrl(media.filepath)}
+                            className="w-full h-full object-cover bg-black"
+                            preload="metadata"
+                            muted
+                            playsInline
+                          />
+                        )}
+                        <div className="absolute left-1 top-1 rounded bg-black/65 px-1.5 py-0.5 text-[10px] text-white flex items-center gap-1">
+                          {media.media_type === 'video' ? <Video className="h-3 w-3" /> : null}
+                          <span>{media.media_type === 'video' ? '视频' : '图片'}</span>
+                        </div>
+                        {selectedMediaIds.includes(media.id) && (
                           <div className="absolute inset-0 bg-primary/20 flex items-center justify-center">
                             <Check className="h-5 w-5 text-primary" />
                           </div>
@@ -258,19 +319,38 @@ export default function Tweets() {
             )}
 
             <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-3 flex-wrap">
                 <span className="text-sm text-muted-foreground">{content.length}/280</span>
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => { setShowMediaPicker(v => !v); if (!showMediaPicker) loadMediaList() }}
+                  onClick={() => {
+                    setShowMediaPicker((v) => !v)
+                    if (!showMediaPicker) loadMediaList()
+                  }}
                 >
                   <ImagePlus className="h-4 w-4 mr-1" />
-                  {selectedMediaIds.length > 0 ? `已选 ${selectedMediaIds.length} 张` : '选择素材'}
+                  {hasSelectedVideo
+                    ? '已选 1 个视频'
+                    : selectedMediaIds.length > 0
+                      ? `已选 ${selectedMediaIds.length} 个素材`
+                      : '选择素材'}
                 </Button>
+                {hasSelectedVideo ? (
+                  <span className="text-xs text-muted-foreground">视频模式下仅支持单个视频</span>
+                ) : (
+                  <span className="text-xs text-muted-foreground">图片模式最多可选 4 张</span>
+                )}
               </div>
               <div className="flex gap-2">
-                <Button variant="outline" onClick={() => { setShowCreate(false); setSelectedMediaIds([]) }}>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setShowCreate(false)
+                    setShowMediaPicker(false)
+                    setSelectedMediaIds([])
+                  }}
+                >
                   取消
                 </Button>
                 <Button onClick={handleCreate} disabled={!content.trim() || content.length > 280}>
@@ -296,14 +376,33 @@ export default function Tweets() {
                 <div className="flex items-start justify-between gap-4">
                   <div className="flex-1 min-w-0">
                     <p className="whitespace-pre-wrap">{tweet.content}</p>
+                    {tweet.media_items.length > 0 && (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {tweet.media_items.map((media) => (
+                          <div key={media.id} className="relative">
+                            {media.media_type === 'image' ? (
+                              <img
+                                src={getMediaUrl(media.filepath)}
+                                alt={media.filename}
+                                className="h-20 w-20 object-cover rounded border"
+                              />
+                            ) : (
+                              <video
+                                src={getMediaUrl(media.filepath)}
+                                className="h-20 w-20 object-cover rounded border bg-black"
+                                preload="metadata"
+                                muted
+                                playsInline
+                              />
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                     <div className="flex items-center gap-4 mt-2 text-sm text-muted-foreground">
                       <span>创建于 {formatDate(tweet.created_at)}</span>
-                      {tweet.scheduled_at && (
-                        <span>排期: {formatDate(tweet.scheduled_at)}</span>
-                      )}
-                      {tweet.published_at && (
-                        <span>发布于 {formatDate(tweet.published_at)}</span>
-                      )}
+                      {tweet.scheduled_at && <span>排期: {formatDate(tweet.scheduled_at)}</span>}
+                      {tweet.published_at && <span>发布于 {formatDate(tweet.published_at)}</span>}
                     </div>
                     {tweet.error_message && (
                       <p className="text-sm text-red-500 mt-1">{tweet.error_message}</p>
@@ -311,9 +410,7 @@ export default function Tweets() {
                   </div>
 
                   <div className="flex items-center gap-2">
-                    <Badge className={getStatusColor(tweet.status)}>
-                      {getStatusText(tweet.status)}
-                    </Badge>
+                    <Badge className={getStatusColor(tweet.status)}>{getStatusText(tweet.status)}</Badge>
 
                     {tweet.status === 'draft' && (
                       <>
@@ -354,11 +451,7 @@ export default function Tweets() {
                     )}
 
                     {(tweet.status === 'draft' || tweet.status === 'failed') && (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => handleDelete(tweet.id)}
-                      >
+                      <Button size="sm" variant="ghost" onClick={() => handleDelete(tweet.id)}>
                         <Trash2 className="h-4 w-4 text-red-500" />
                       </Button>
                     )}

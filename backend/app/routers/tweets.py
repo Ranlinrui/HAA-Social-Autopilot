@@ -6,16 +6,26 @@ from typing import Optional
 from datetime import datetime
 
 from app.database import get_db
-from app.models.tweet import Tweet, TweetStatus
-from app.models.media import Media
+from app.models.tweet import Tweet, TweetStatus, TweetType
+from app.models.media import Media, MediaType
 from app.schemas.tweet import (
     TweetCreate, TweetUpdate, TweetResponse, TweetListResponse, TweetSchedule
 )
 from app.logger import setup_logger
+from app.services.tweet_guard import apply_publish_guard
 
 router = APIRouter(prefix="/api/tweets", tags=["tweets"])
 logger = setup_logger("tweets")
 
+
+
+
+def infer_tweet_type(media_items: list[Media]) -> TweetType:
+    if any(media.media_type == MediaType.VIDEO for media in media_items):
+        return TweetType.VIDEO
+    if media_items:
+        return TweetType.IMAGE
+    return TweetType.TEXT
 
 @router.get("", response_model=TweetListResponse)
 async def get_tweets(
@@ -55,13 +65,17 @@ async def create_tweet(
         status=TweetStatus.DRAFT
     )
 
+    media_items: list[Media] = []
+
     # 关联素材
     if tweet_data.media_ids:
         result = await db.execute(
             select(Media).where(Media.id.in_(tweet_data.media_ids))
         )
-        media_items = result.scalars().all()
-        tweet.media_items = list(media_items)
+        media_items = list(result.scalars().all())
+        tweet.media_items = media_items
+
+    tweet.tweet_type = infer_tweet_type(media_items) if media_items else tweet_data.tweet_type
 
     db.add(tweet)
     await db.commit()
@@ -117,8 +131,9 @@ async def update_tweet(
         result = await db.execute(
             select(Media).where(Media.id.in_(tweet_data.media_ids))
         )
-        media_items = result.scalars().all()
-        tweet.media_items = list(media_items)
+        media_items = list(result.scalars().all())
+        tweet.media_items = media_items
+        tweet.tweet_type = infer_tweet_type(media_items) if media_items else TweetType.TEXT
 
     await db.commit()
     await db.refresh(tweet)
@@ -193,10 +208,12 @@ async def publish_tweet_now(
         raise HTTPException(status_code=400, detail="Tweet already published")
 
     tweet.status = TweetStatus.PUBLISHING
+    tweet.error_message = None
     await db.commit()
     logger.info("开始发布推文 id=%d，内容: %.50s...", tweet_id, tweet.content)
 
     try:
+        await apply_publish_guard(tweet)
         twitter_id = await publish_tweet(tweet)
         tweet.status = TweetStatus.PUBLISHED
         tweet.published_at = datetime.utcnow()
@@ -205,9 +222,10 @@ async def publish_tweet_now(
         logger.info("推文发布成功 id=%d，twitter_id=%s", tweet_id, twitter_id)
     except Exception as e:
         tweet.status = TweetStatus.FAILED
-        tweet.error_message = str(e)
+        detail = str(e).strip() or repr(e)
+        tweet.error_message = detail
         tweet.retry_count += 1
-        logger.error("推文发布失败 id=%d，错误: %s", tweet_id, e)
+        logger.exception("推文发布失败 id=%d，错误: %s", tweet_id, detail)
 
     await db.commit()
     await db.refresh(tweet)

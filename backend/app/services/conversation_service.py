@@ -214,14 +214,19 @@ class ConversationService:
 
     async def _handle_mention(self, db: AsyncSession, mention: dict, cfg: ConversationSetting):
         """
-        Check if this mention is a reply to one of our tweets.
-        If so, create or update a ConversationThread.
+        Handle an incoming mention notification.
+
+        Accepts any mention where someone @-replied to one of our tweets.
+        Priority lookup order:
+          1. Existing ConversationThread (continued thread)
+          2. EngageReply record (reply sent via Engage feature)
+          3. Any mention with in_reply_to set (direct reply to our tweet)
         """
         in_reply_to = mention.get("in_reply_to")
         if not in_reply_to:
             return
 
-        # Check if this mention already exists
+        # Skip if we already have a thread for this exact mention tweet
         existing = await db.execute(
             select(ConversationThread).where(
                 ConversationThread.latest_mention_id == mention["tweet_id"]
@@ -230,14 +235,7 @@ class ConversationService:
         if existing.scalar_one_or_none():
             return
 
-        # Find if in_reply_to matches any of our reply IDs
-        # Check EngageReply table and existing ConversationThreads
-        from app.models.engage import EngageReply
-        engage_result = await db.execute(
-            select(EngageReply).where(EngageReply.reply_id == in_reply_to)
-        )
-        engage_reply = engage_result.scalar_one_or_none()
-
+        # Check if this is a continuation of an existing thread
         thread_result = await db.execute(
             select(ConversationThread).where(
                 ConversationThread.replied_tweet_id == in_reply_to
@@ -245,18 +243,21 @@ class ConversationService:
         )
         parent_thread = thread_result.scalar_one_or_none()
 
-        if not engage_reply and not parent_thread:
-            # Not a reply to our content, skip
-            return
+        # Check if in_reply_to matches a reply we sent via Engage
+        from app.models.engage import EngageReply
+        engage_result = await db.execute(
+            select(EngageReply).where(EngageReply.reply_id == in_reply_to)
+        )
+        engage_reply = engage_result.scalar_one_or_none()
 
-        # Build history
+        # Build history based on what we found
         if parent_thread:
             history = list(parent_thread.history or [])
             root_tweet_id = parent_thread.root_tweet_id
             root_tweet_text = parent_thread.root_tweet_text
             our_reply_id = in_reply_to
             our_reply_text = parent_thread.replied_text
-        else:
+        elif engage_reply:
             history = [
                 {
                     "role": "us",
@@ -269,6 +270,14 @@ class ConversationService:
             root_tweet_text = engage_reply.tweet_text
             our_reply_id = engage_reply.reply_id
             our_reply_text = engage_reply.reply_content
+        else:
+            # Direct reply to one of our tweets (not tracked in EngageReply)
+            # Treat in_reply_to as the root tweet we authored
+            history = []
+            root_tweet_id = in_reply_to
+            root_tweet_text = ""
+            our_reply_id = in_reply_to
+            our_reply_text = ""
 
         # Append the incoming mention to history
         history.append({

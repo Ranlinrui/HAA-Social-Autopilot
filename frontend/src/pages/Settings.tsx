@@ -140,24 +140,23 @@ export default function Settings() {
           <CardHeader>
             <CardTitle>Twitter配置</CardTitle>
             <CardDescription>
-              配置Twitter API凭证或Playwright登录信息
+              配置 Twitter 执行模式与账号登录信息
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="grid gap-4">
               <div>
-                <label className="text-sm font-medium">发布模式</label>
+                <label className="text-sm font-medium">执行模式</label>
                 <select
                   className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm mt-1"
                   value={settings.twitter_publish_mode || 'twikit'}
                   onChange={(e) => handleSave('twitter_publish_mode', e.target.value)}
                 >
-                  <option value="twikit">Twikit模式 (推荐 - 免费)</option>
-                  <option value="api">API模式 (官方API - 付费)</option>
-                  <option value="playwright">Playwright模式 (浏览器自动化)</option>
+                  <option value="twikit">Twikit 模式 (兼容/当前可用)</option>
+                  <option value="browser">Browser 模式 (长期主模式，开发中)</option>
                 </select>
                 <p className="text-xs text-muted-foreground mt-1">
-                  Twikit使用Twitter内部API，免费无限制；API模式需付费；Playwright模式可能触发验证
+                  Twikit 模式保留现有低成本链路；Browser 模式用于后续长期替代方案，当前仍在开发中。
                 </p>
               </div>
 

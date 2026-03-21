@@ -9,11 +9,11 @@ A lightweight, self-hosted automation platform for organic Twitter/X growth. Sch
 ## Features
 
 - **Tweet Scheduling** — Create, edit, and schedule tweets with a visual calendar
-- **LLM Content Generation** — Generate tweets and replies using any OpenAI-compatible API (GPT, Claude, Deepseek, etc.)
-- **Engage** — Search hot tweets by keyword, generate contextual AI replies, batch reply with rate-limit protection
+- **Media Library** — Upload and manage images/videos; attach up to 4 images when creating a tweet
+- **LLM Content Generation** — 5 content-specific prompt templates (AI reasoning showcase, trade report, AI vs AI comparison, hot take, story/narrative); generate tweets and replies using any OpenAI-compatible API
+- **Engage** — Search hot tweets by keyword, generate contextual AI replies, batch reply with rate-limit protection; quote-tweet with optional image attachments (up to 4)
 - **Account Monitoring** — Watch target accounts for new tweets, auto-engage with configurable delay
 - **Conversation Follow-up** — Detect replies to your comments, continue threads in auto or manual mode
-- **Media Library** — Upload and manage images/videos for your posts
 - **Cookie-based Auth** — No official API key required; uses twikit for Twitter access
 
 ---

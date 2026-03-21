@@ -2,6 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import Dict, Any
+import json
+import os
 
 from app.database import get_db
 from app.models.setting import Setting
@@ -15,6 +17,22 @@ from app.config import settings as app_settings
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 
+COOKIE_FILE = "/app/data/twitter_cookies.json"
+
+
+def _load_cookie_mode_state() -> Dict[str, Any] | None:
+    try:
+        if not os.path.exists(COOKIE_FILE):
+            return None
+        with open(COOKIE_FILE, 'r') as f:
+            data = json.load(f)
+        if not data.get('auth_token') or not data.get('ct0'):
+            return None
+        return data
+    except Exception:
+        return None
+
+
 @router.get("", response_model=SettingsResponse)
 async def get_settings(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Setting))
@@ -23,6 +41,7 @@ async def get_settings(db: AsyncSession = Depends(get_db)):
     settings_dict: Dict[str, Any] = {
         "llm_model": app_settings.llm_model,
         "llm_api_base": app_settings.llm_api_base,
+        "twitter_publish_mode": app_settings.twitter_publish_mode,
     }
 
     for s in db_settings:
@@ -78,6 +97,32 @@ async def twitter_login(
 ):
     from app.services.twitter_twikit import TwitterTwikit, reset_twitter_twikit
 
+    cookie_state = _load_cookie_mode_state()
+    if cookie_state:
+        credentials = [
+            ("twitter_username", data.username),
+            ("twitter_email", data.email),
+        ]
+        if data.password:
+            credentials.append(("twitter_password", data.password))
+
+        for key, value in credentials:
+            result = await db.execute(select(Setting).where(Setting.key == key))
+            setting = result.scalar_one_or_none()
+            if setting:
+                setting.value = value
+            else:
+                db.add(Setting(key=key, value=value))
+
+        await db.commit()
+        reset_twitter_twikit()
+        fallback_username = cookie_state.get("account_name") or data.username
+        return TwitterLoginResponse(
+            success=True,
+            message="Cookie 模式已启用：检测到本地 auth_token/ct0，跳过 live twikit 登录验证",
+            username=fallback_username,
+        )
+
     try:
         # 如果未传密码，从数据库读取已保存的密码
         password = data.password
@@ -132,6 +177,31 @@ async def twitter_login(
             username=me["username"]
         )
     except Exception as e:
+        cookie_state = _load_cookie_mode_state()
+        if cookie_state:
+            for key, value in [("twitter_username", data.username), ("twitter_email", data.email)]:
+                result = await db.execute(select(Setting).where(Setting.key == key))
+                setting = result.scalar_one_or_none()
+                if setting:
+                    setting.value = value
+                else:
+                    db.add(Setting(key=key, value=value))
+            if data.password:
+                result = await db.execute(select(Setting).where(Setting.key == "twitter_password"))
+                setting = result.scalar_one_or_none()
+                if setting:
+                    setting.value = data.password
+                else:
+                    db.add(Setting(key="twitter_password", value=data.password))
+            await db.commit()
+            reset_twitter_twikit()
+            fallback_username = cookie_state.get("account_name") or data.username
+            return TwitterLoginResponse(
+                success=True,
+                message="Cookie 模式已启用：已保存账号配置并检测到本地 auth_token/ct0，跳过 live twikit 登录验证",
+                username=fallback_username
+            )
+
         return TwitterLoginResponse(
             success=False,
             message=f"登录失败: {str(e)}"
@@ -141,6 +211,15 @@ async def twitter_login(
 @router.post("/test-twitter", response_model=TwitterTestResponse)
 async def test_twitter_connection():
     from app.services.twitter_api import test_connection
+
+    cookie_state = _load_cookie_mode_state()
+    if cookie_state:
+        username = cookie_state.get("account_name") or cookie_state.get("username") or "default"
+        return TwitterTestResponse(
+            success=True,
+            message="Twitter cookie 已加载，当前使用 Cookie 模式，跳过 live twikit transaction 验证",
+            username=username
+        )
 
     try:
         username = await test_connection()

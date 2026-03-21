@@ -34,3 +34,6 @@ lxml
 webvtt-py
 m3u8
 Js2Py-3.13
+
+# X client transaction community fallback
+XClientTransaction

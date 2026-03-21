@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     twitter_username: str = ""
     twitter_email: str = ""
     twitter_password: str = ""
+    twitter_publish_mode: str = "twikit"
 
     # LLM配置
     llm_api_base: str = "https://api.openai.com/v1"
@@ -25,7 +26,7 @@ class Settings(BaseSettings):
 
     # 上传配置
     upload_dir: str = "./uploads"
-    max_upload_size: int = 10485760  # 10MB
+    max_upload_size: int = 104857600  # 100MB
 
     class Config:
         env_file = ".env"

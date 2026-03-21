@@ -1,14 +1,64 @@
 from typing import Optional, List
 import os
 import asyncio
+import mimetypes
+import httpx
 import traceback
+from types import MethodType
 from twikit import Client
 from twikit.errors import BadRequest, Unauthorized, NotFound, Forbidden
 from app.config import settings
+from app.models.media import MediaType
 from app.models.tweet import Tweet
 from app.logger import setup_logger
 
+try:
+    from x_client_transaction import ClientTransaction as CommunityClientTransaction
+    from x_client_transaction.utils import handle_x_migration_async, get_ondemand_file_url
+except Exception:  # pragma: no cover - optional experiment dependency
+    CommunityClientTransaction = None
+    handle_x_migration_async = None
+    get_ondemand_file_url = None
+
 logger = setup_logger("twikit")
+
+
+class CommunityTransactionAdapter:
+    def __init__(self):
+        self.home_page_response = None
+        self.DEFAULT_ROW_INDEX = None
+        self.DEFAULT_KEY_BYTES_INDICES = None
+        self.key = None
+        self.animation_key = None
+        self._provider = None
+
+    async def init(self, session, headers):
+        if CommunityClientTransaction is None or handle_x_migration_async is None or get_ondemand_file_url is None:
+            raise RuntimeError("x_client_transaction is not available")
+
+        home_page_response = await handle_x_migration_async(session)
+        ondemand_file_url = get_ondemand_file_url(home_page_response)
+        ondemand_file_response = await session.request(method="GET", url=ondemand_file_url, headers=headers)
+        provider = CommunityClientTransaction(home_page_response, ondemand_file_response.text)
+
+        self._provider = provider
+        self.home_page_response = provider.home_page_response
+        self.DEFAULT_ROW_INDEX = provider.row_index
+        self.DEFAULT_KEY_BYTES_INDICES = provider.key_bytes_indices
+        self.key = provider.key
+        self.animation_key = provider.animation_key
+
+    def generate_transaction_id(self, method: str, path: str, response=None, key=None, animation_key=None, time_now=None):
+        if self._provider is None:
+            raise RuntimeError("Community transaction provider is not initialized")
+        return self._provider.generate_transaction_id(
+            method=method,
+            path=path,
+            home_page_response=response or self.home_page_response,
+            key=key,
+            animation_key=animation_key,
+            time_now=time_now,
+        )
 
 
 class TwitterTwikit:
@@ -20,6 +70,10 @@ class TwitterTwikit:
         proxy = settings.proxy_url if settings.proxy_url else None
         logger.info("创建 twikit 客户端，代理: %s", proxy or "无")
         client = Client(language='en-US', proxy=proxy)
+        client.http.timeout = httpx.Timeout(60.0, connect=30.0, read=60.0, write=60.0, pool=60.0)
+        if CommunityClientTransaction is not None:
+            logger.info("启用社区 transaction provider: x_client_transaction")
+            client.client_transaction = CommunityTransactionAdapter()
         # 修复 twikit 2.3.3 bug: onboarding_task 等方法未携带完整 headers
         # 导致 Cloudflare 因缺少 User-Agent 而拦截请求返回 403
         client.http.headers.update({
@@ -27,6 +81,45 @@ class TwitterTwikit:
             'Referer': 'https://x.com/',
             'Accept-Language': 'en-US,en;q=0.9',
         })
+
+        original_request = client.request
+        transaction_lock = asyncio.Lock()
+
+        def _transaction_ready() -> bool:
+            ct = client.client_transaction
+            return bool(
+                getattr(ct, 'home_page_response', None)
+                and getattr(ct, 'DEFAULT_ROW_INDEX', None) is not None
+                and getattr(ct, 'DEFAULT_KEY_BYTES_INDICES', None) is not None
+                and hasattr(ct, 'key')
+                and hasattr(ct, 'animation_key')
+            )
+
+        async def _ensure_transaction_ready() -> None:
+            if _transaction_ready():
+                return
+            async with transaction_lock:
+                if _transaction_ready():
+                    return
+                cookies_backup = client.get_cookies().copy()
+                ct_headers = {
+                    'Accept-Language': f'{client.language},{client.language.split("-")[0]};q=0.9',
+                    'Cache-Control': 'no-cache',
+                    'Referer': 'https://x.com/',
+                    'User-Agent': client._user_agent,
+                }
+                await client.client_transaction.init(client.http, ct_headers)
+                client.set_cookies(cookies_backup, clear_cookies=True)
+
+        async def patched_request(self, method, url, *args, **kwargs):
+            await _ensure_transaction_ready()
+            url_text = str(url)
+            if 'media/upload' in url_text and 'timeout' not in kwargs:
+                kwargs['timeout'] = httpx.Timeout(300.0, connect=30.0, read=300.0, write=300.0, pool=300.0)
+                logger.info('媒体上传请求启用长超时: %s', url_text)
+            return await original_request(method, url, *args, **kwargs)
+
+        client.request = MethodType(patched_request, client)
         return client
 
     async def init_client(self):
@@ -323,8 +416,24 @@ class TwitterTwikit:
         media_ids = []
         if media_paths:
             for path in media_paths:
-                logger.info("上传媒体文件: %s", path)
-                media_id = await self.client.upload_media(path, wait_for_completion=True)
+                guessed_type, _ = mimetypes.guess_type(path)
+                upload_kwargs = {
+                    'wait_for_completion': True,
+                }
+                if guessed_type:
+                    upload_kwargs['media_type'] = guessed_type
+                if guessed_type and guessed_type.startswith('video'):
+                    upload_kwargs['media_category'] = 'tweet_video'
+                elif guessed_type == 'image/gif':
+                    upload_kwargs['media_category'] = 'tweet_gif'
+
+                logger.info("上传媒体文件: %s, mime=%s, kwargs=%s", path, guessed_type, upload_kwargs)
+                try:
+                    media_id = await self.client.upload_media(path, **upload_kwargs)
+                except Exception as e:
+                    logger.exception("媒体上传失败: path=%s, mime=%s, error=%r", path, guessed_type, e)
+                    detail = str(e).strip() or repr(e)
+                    raise ValueError(f"媒体上传失败: {detail}") from e
                 media_ids.append(media_id)
                 logger.debug("媒体上传成功，media_id: %s", media_id)
 
@@ -425,7 +534,11 @@ class TwitterTwikit:
     async def get_mentions(self, count: int = 40) -> List[dict]:
         """
         Fetch recent mention notifications (replies to our tweets/comments).
-        Returns a list of dicts with mention details.
+
+        twikit's get_notifications('Mentions') parses globalObjects.notifications
+        which is always empty for the Mentions endpoint. The actual data lives in
+        globalObjects.tweets + timeline.instructions[addEntries], so we parse the
+        raw v11 response directly.
         """
         if not self.client:
             try:
@@ -435,24 +548,58 @@ class TwitterTwikit:
 
         logger.info("Fetching mention notifications, count=%d", count)
         try:
-            notifications = await self.client.get_notifications('Mentions', count=count)
+            response, _ = await self.client.v11.notifications_mentions(count, None)
+
+            global_objects = response.get('globalObjects', {})
+            tweets_data = global_objects.get('tweets', {})
+            users_data = global_objects.get('users', {})
+
+            # Extract notification entries from timeline instructions
+            entries = []
+            for inst in response.get('timeline', {}).get('instructions', []):
+                if 'addEntries' in inst:
+                    entries = inst['addEntries'].get('entries', [])
+                    break
+
             mentions = []
-            for notif in notifications:
-                tweet = getattr(notif, 'tweet', None)
-                from_user = getattr(notif, 'from_user', None)
-                if not tweet or not from_user:
+            for entry in entries:
+                entry_id = entry.get('entryId', '')
+                if not entry_id.startswith('notification-'):
                     continue
+
+                try:
+                    tweet_id = entry['content']['item']['content']['tweet']['id']
+                except (KeyError, TypeError):
+                    continue
+
+                tweet_data = tweets_data.get(tweet_id)
+                if not tweet_data:
+                    continue
+
+                user_id = tweet_data.get('user_id_str')
+                user_data = users_data.get(user_id, {})
+
+                in_reply_to = tweet_data.get('in_reply_to_status_id_str')
+                text = tweet_data.get('full_text') or tweet_data.get('text') or ''
+                screen_name = user_data.get('screen_name', '')
+                user_name = user_data.get('name', '')
+                created_at = tweet_data.get('created_at', '')
+
+                # notification_id is the entry sort index (stable across polls)
+                notification_id = entry.get('sortIndex', entry_id)
+
                 mentions.append({
-                    "notification_id": notif.id,
-                    "tweet_id": tweet.id,
-                    "tweet_text": tweet.text or "",
-                    "in_reply_to": getattr(tweet, 'in_reply_to', None),
-                    "from_username": from_user.screen_name,
-                    "from_user_id": from_user.id,
-                    "from_user_name": from_user.name,
-                    "created_at": str(getattr(tweet, 'created_at', '')),
-                    "created_at_datetime": getattr(tweet, 'created_at_datetime', None),
+                    "notification_id": notification_id,
+                    "tweet_id": tweet_id,
+                    "tweet_text": text,
+                    "in_reply_to": in_reply_to,
+                    "from_username": screen_name,
+                    "from_user_id": user_id,
+                    "from_user_name": user_name,
+                    "created_at": created_at,
+                    "created_at_datetime": None,
                 })
+
             logger.info("Fetched %d mention notifications", len(mentions))
             return mentions
         except Exception as e:
