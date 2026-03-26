@@ -4,7 +4,11 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
-import api from '@/services/api'
+import api, { formatTwitterActionError } from '@/services/api'
+import { InlineConfirm } from '@/components/InlineConfirm'
+import { InlineNotice } from '@/components/InlineNotice'
+import { TwitterRiskBanner, getWriteBlockedReason, type TwitterRiskStateLike } from '@/components/TwitterRiskStatus'
+import { TwitterGuardedButton } from '@/components/TwitterGuardedButton'
 
 interface MonitoredAccount {
   id: number
@@ -38,7 +42,7 @@ interface Notification {
   auto_engage_error?: string
 }
 
-interface Stats {
+interface Stats extends TwitterRiskStateLike {
   total_accounts: number
   active_accounts: number
   total_notifications: number
@@ -46,6 +50,11 @@ interface Stats {
   uncommented_notifications: number
   today_notifications: number
   monitor_running: boolean
+  backoff_seconds?: number
+  backoff_until?: string
+  read_only_until?: string
+  auth_backoff_until?: string
+  recovery_until?: string
 }
 
 export default function Monitor() {
@@ -55,7 +64,11 @@ export default function Monitor() {
   const [newUsername, setNewUsername] = useState('')
   const [newPriority, setNewPriority] = useState(2)
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
+  const [actionMessage, setActionMessage] = useState<{ tone: 'error' | 'success' | 'info'; title: string; message: string } | null>(null)
   const [adding, setAdding] = useState(false)
+  const [pendingDeleteAccountId, setPendingDeleteAccountId] = useState<number | null>(null)
+  const [pendingRetweetNotifId, setPendingRetweetNotifId] = useState<number | null>(null)
 
   // Auto-engage config panel state per account
   const [engagePanel, setEngagePanel] = useState<Record<number, boolean>>({})
@@ -71,6 +84,7 @@ export default function Monitor() {
   const [replyErrors, setReplyErrors] = useState<Record<number, string>>({})
   // 'reply' | 'quote' | null - which action panel is open
   const [activePanel, setActivePanel] = useState<Record<number, 'reply' | 'quote' | null>>({})
+  const writeBlockedReason = getWriteBlockedReason(stats)
 
   useEffect(() => {
     loadData()
@@ -79,23 +93,53 @@ export default function Monitor() {
   }, [])
 
   const loadData = async () => {
+    let hasFailure = false
+
     try {
-      const [accountsRes, notificationsRes, statsRes] = await Promise.all([
+      setLoadError('')
+      const [accountsRes, notificationsRes, statsRes] = await Promise.allSettled([
         api.get('/monitor/accounts'),
         api.get('/monitor/notifications?limit=50'),
         api.get('/monitor/stats')
       ])
-      setAccounts(accountsRes.data)
-      setNotifications(notificationsRes.data)
-      setStats(statsRes.data)
-      // Initialize engage config from loaded accounts
-      const configs: Record<number, { auto_engage: boolean; engage_action: string; engage_delay: number }> = {}
-      for (const acc of accountsRes.data) {
-        configs[acc.id] = { auto_engage: acc.auto_engage, engage_action: acc.engage_action, engage_delay: acc.engage_delay }
+
+      if (accountsRes.status === 'fulfilled') {
+        setAccounts(accountsRes.value.data)
+        const configs: Record<number, { auto_engage: boolean; engage_action: string; engage_delay: number }> = {}
+        for (const acc of accountsRes.value.data) {
+          configs[acc.id] = { auto_engage: acc.auto_engage, engage_action: acc.engage_action, engage_delay: acc.engage_delay }
+        }
+        setEngageConfig(configs)
+      } else {
+        hasFailure = true
       }
-      setEngageConfig(configs)
+
+      if (notificationsRes.status === 'fulfilled') {
+        setNotifications(notificationsRes.value.data)
+      } else {
+        hasFailure = true
+      }
+
+      if (statsRes.status === 'fulfilled') {
+        setStats(statsRes.value.data)
+      } else {
+        hasFailure = true
+      }
+
+      if (hasFailure) {
+        const firstError =
+          accountsRes.status === 'rejected'
+            ? accountsRes.reason
+            : notificationsRes.status === 'rejected'
+              ? notificationsRes.reason
+              : statsRes.status === 'rejected'
+                ? statsRes.reason
+                : null
+        setLoadError(formatTwitterActionError(firstError, '部分监控数据加载失败'))
+      }
     } catch (error) {
       console.error('Failed to load data:', error)
+      setLoadError(formatTwitterActionError(error, '监控数据加载失败'))
     } finally {
       setLoading(false)
     }
@@ -112,20 +156,22 @@ export default function Monitor() {
       setNewUsername('')
       setNewPriority(2)
       await loadData()
+      setActionMessage({ tone: 'success', title: '监控账号已添加', message: `@${newUsername.trim()} 已加入监控列表。` })
     } catch (error: any) {
-      alert(error.response?.data?.detail || 'Failed to add account')
+      setActionMessage({ tone: 'error', title: '添加监控账号失败', message: formatTwitterActionError(error, '添加监控账号失败') })
     } finally {
       setAdding(false)
     }
   }
 
   const handleDeleteAccount = async (id: number) => {
-    if (!confirm('确定停止监控此账号？')) return
     try {
       await api.delete(`/monitor/accounts/${id}`)
       await loadData()
+      setPendingDeleteAccountId(null)
+      setActionMessage({ tone: 'success', title: '监控账号已删除', message: '该账号已从监控列表移除。' })
     } catch (error) {
-      alert('Failed to delete account')
+      setActionMessage({ tone: 'error', title: '删除监控账号失败', message: formatTwitterActionError(error, '删除监控账号失败') })
     }
   }
 
@@ -133,8 +179,9 @@ export default function Monitor() {
     try {
       await api.patch(`/monitor/accounts/${id}/toggle`)
       await loadData()
+      setActionMessage({ tone: 'success', title: '监控状态已更新', message: '账号监控开关已切换。' })
     } catch (error) {
-      alert('Failed to toggle account')
+      setActionMessage({ tone: 'error', title: '切换监控失败', message: formatTwitterActionError(error, '切换监控账号状态失败') })
     }
   }
 
@@ -143,7 +190,7 @@ export default function Monitor() {
       await api.post(`/monitor/notifications/${id}/comment`, { comment_text: text })
       await loadData()
     } catch (error) {
-      alert('Failed to mark as commented')
+      setActionMessage({ tone: 'error', title: '更新通知状态失败', message: formatTwitterActionError(error, '更新通知状态失败') })
     }
   }
 
@@ -160,7 +207,7 @@ export default function Monitor() {
       })
       setReplyDrafts(prev => ({ ...prev, [notif.id]: res.data.content }))
     } catch (e: any) {
-      setReplyErrors(prev => ({ ...prev, [notif.id]: e.response?.data?.detail || 'Failed to generate reply' }))
+      setReplyErrors(prev => ({ ...prev, [notif.id]: formatTwitterActionError(e, '生成回复草稿失败') }))
     } finally {
       setGenerating(prev => ({ ...prev, [notif.id]: false }))
     }
@@ -177,7 +224,7 @@ export default function Monitor() {
       setReplyDrafts(prev => ({ ...prev, [notif.id]: '' }))
       setActivePanel(prev => ({ ...prev, [notif.id]: null }))
     } catch (e: any) {
-      setReplyErrors(prev => ({ ...prev, [notif.id]: e.response?.data?.detail || 'Failed to send reply' }))
+      setReplyErrors(prev => ({ ...prev, [notif.id]: formatTwitterActionError(e, '发送回复失败') }))
     } finally {
       setSending(prev => ({ ...prev, [notif.id]: false }))
     }
@@ -194,21 +241,21 @@ export default function Monitor() {
       setReplyDrafts(prev => ({ ...prev, [notif.id]: '' }))
       setActivePanel(prev => ({ ...prev, [notif.id]: null }))
     } catch (e: any) {
-      setReplyErrors(prev => ({ ...prev, [notif.id]: e.response?.data?.detail || 'Failed to quote tweet' }))
+      setReplyErrors(prev => ({ ...prev, [notif.id]: formatTwitterActionError(e, '引用转发失败') }))
     } finally {
       setQuoting(prev => ({ ...prev, [notif.id]: false }))
     }
   }
 
   const handleRetweet = async (notif: Notification) => {
-    if (!confirm(`确定转发 @${notif.author_username} 的推文？`)) return
     setRetweeting(prev => ({ ...prev, [notif.id]: true }))
     setReplyErrors(prev => ({ ...prev, [notif.id]: '' }))
     try {
       await api.post(`/engage/retweet/${notif.tweet_id}`)
       await handleMarkCommented(notif.id, '[转发]')
+      setPendingRetweetNotifId(null)
     } catch (e: any) {
-      setReplyErrors(prev => ({ ...prev, [notif.id]: e.response?.data?.detail || 'Failed to retweet' }))
+      setReplyErrors(prev => ({ ...prev, [notif.id]: formatTwitterActionError(e, '转发失败') }))
     } finally {
       setRetweeting(prev => ({ ...prev, [notif.id]: false }))
     }
@@ -222,8 +269,9 @@ export default function Monitor() {
       await api.patch(`/monitor/accounts/${accountId}/auto-engage`, config)
       await loadData()
       setEngagePanel(prev => ({ ...prev, [accountId]: false }))
+      setActionMessage({ tone: 'success', title: '自动互动配置已保存', message: '新的自动互动参数已生效。' })
     } catch (e: any) {
-      alert(e.response?.data?.detail || 'Failed to save config')
+      setActionMessage({ tone: 'error', title: '保存自动互动配置失败', message: formatTwitterActionError(e, '保存自动互动配置失败') })
     } finally {
       setSavingEngage(prev => ({ ...prev, [accountId]: false }))
     }
@@ -248,6 +296,55 @@ export default function Monitor() {
         <h1 className="text-2xl font-bold">账号监控</h1>
         <p className="text-muted-foreground mt-1">监控名人/交易所账号，第一时间发现新推文</p>
       </div>
+
+      {actionMessage && (
+        <InlineNotice
+          tone={actionMessage.tone}
+          title={actionMessage.title}
+          message={actionMessage.message}
+          dismissible
+          autoHideMs={actionMessage.tone === 'error' ? undefined : 4000}
+          onClose={() => setActionMessage(null)}
+        />
+      )}
+
+      {pendingDeleteAccountId !== null && (
+        <InlineConfirm
+          title="确认停止监控"
+          message="该账号将从监控列表中移除，但历史通知记录不会被删除。"
+          confirmLabel="停止监控"
+          onConfirm={() => handleDeleteAccount(pendingDeleteAccountId)}
+          onCancel={() => setPendingDeleteAccountId(null)}
+        />
+      )}
+
+      {pendingRetweetNotifId !== null && (() => {
+        const notif = notifications.find((item) => item.id === pendingRetweetNotifId)
+        if (!notif) return null
+        return (
+          <InlineConfirm
+            title="确认转发"
+            message={`即将转发 @${notif.author_username} 的推文，并同步更新该通知状态。`}
+            confirmLabel="确认转发"
+            busy={!!retweeting[notif.id]}
+            onConfirm={() => handleRetweet(notif)}
+            onCancel={() => setPendingRetweetNotifId(null)}
+          />
+        )
+      })()}
+
+      {loadError && (
+        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">
+          <div className="font-medium">监控页加载失败</div>
+          <div className="mt-1">{loadError}</div>
+          <div className="mt-2">
+            <Button type="button" variant="outline" size="sm" onClick={loadData}>
+              <RefreshCw className="mr-2 h-4 w-4" />
+              重新加载
+            </Button>
+          </div>
+        </div>
+      )}
 
       {/* Stats */}
       {stats && (
@@ -304,6 +401,19 @@ export default function Monitor() {
             </CardContent>
           </Card>
         </div>
+      )}
+
+      <TwitterRiskBanner state={stats} />
+
+      {stats && (stats.backoff_seconds || 0) > 0 && (
+        <Card className="border-amber-200 bg-amber-50">
+          <CardContent className="pt-6">
+            <p className="text-sm font-medium text-amber-900">监控当前处于风控冷却期</p>
+            <p className="text-sm text-amber-800 mt-1">
+              剩余约 {Math.ceil((stats.backoff_seconds || 0) / 60)} 分钟，期间会暂停新的监控抓取和自动互动。
+            </p>
+          </CardContent>
+        </Card>
       )}
 
       {/* Add Account */}
@@ -393,7 +503,7 @@ export default function Monitor() {
                     <Button
                       size="sm"
                       variant="destructive"
-                      onClick={() => handleDeleteAccount(account.id)}
+                      onClick={() => setPendingDeleteAccountId(account.id)}
                     >
                       <Trash2 className="h-4 w-4" />
                     </Button>
@@ -533,14 +643,17 @@ export default function Monitor() {
                             <Repeat2 className="h-3.5 w-3.5" />
                             引用转发
                           </button>
-                          <button
-                            onClick={() => handleRetweet(notif)}
+                          <TwitterGuardedButton
+                            onClick={() => setPendingRetweetNotifId(notif.id)}
                             disabled={retweeting[notif.id]}
-                            className="flex items-center gap-1.5 px-3 py-1.5 text-sm border rounded-md hover:bg-accent disabled:opacity-50"
-                          >
-                            {retweeting[notif.id] ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Repeat2 className="h-3.5 w-3.5 text-green-600" />}
-                            转发
-                          </button>
+                            loading={retweeting[notif.id]}
+                            icon={<Repeat2 className="h-3.5 w-3.5 text-green-600" />}
+                            label="转发"
+                            variant="outline"
+                            writeBlocked={!!stats?.write_blocked}
+                            writeBlockedReason={writeBlockedReason}
+                            className="h-auto gap-1.5 px-3 py-1.5 text-sm"
+                          />
                         </div>
 
                         {/* Reply / Quote panel */}
@@ -572,23 +685,27 @@ export default function Monitor() {
                                 AI 生成
                               </button>
                               {activePanel[notif.id] === 'reply' ? (
-                                <button
+                                <TwitterGuardedButton
                                   onClick={() => handleSendReply(notif)}
                                   disabled={sending[notif.id] || !replyDrafts[notif.id]?.trim()}
-                                  className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50"
-                                >
-                                  {sending[notif.id] ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
-                                  发送评论
-                                </button>
+                                  loading={sending[notif.id]}
+                                  icon={<Send className="h-3.5 w-3.5" />}
+                                  label="发送评论"
+                                  writeBlocked={!!stats?.write_blocked}
+                                  writeBlockedReason={writeBlockedReason}
+                                  className="h-auto gap-1.5 px-3 py-1.5 text-sm"
+                                />
                               ) : (
-                                <button
+                                <TwitterGuardedButton
                                   onClick={() => handleQuoteTweet(notif)}
                                   disabled={quoting[notif.id] || !replyDrafts[notif.id]?.trim()}
-                                  className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50"
-                                >
-                                  {quoting[notif.id] ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Repeat2 className="h-3.5 w-3.5" />}
-                                  发送引用
-                                </button>
+                                  loading={quoting[notif.id]}
+                                  icon={<Repeat2 className="h-3.5 w-3.5" />}
+                                  label="发送引用"
+                                  writeBlocked={!!stats?.write_blocked}
+                                  writeBlockedReason={writeBlockedReason}
+                                  className="h-auto gap-1.5 px-3 py-1.5 text-sm"
+                                />
                               )}
                             </div>
                           </div>

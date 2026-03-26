@@ -3,14 +3,61 @@ import { RefreshCw, CheckCircle, XCircle, LogIn } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
-import { settingsApi } from '@/services/api'
+import { formatTwitterActionError, settingsApi } from '@/services/api'
 import TwitterCookieManager from '@/components/TwitterCookieManager'
+import { InlineNotice } from '@/components/InlineNotice'
+import { TwitterRiskAccountPanel, TwitterRiskBanner, type TwitterRiskAccountLike, type TwitterRiskStateLike } from '@/components/TwitterRiskStatus'
 
 interface TestResult {
   success: boolean
   message: string
   detail?: string
 }
+
+interface PageMessage {
+  tone: 'error' | 'success' | 'info'
+  title: string
+  message: string
+}
+
+interface CookieStatus {
+  configured: boolean
+  is_valid?: boolean
+  is_expired?: boolean
+  account_name?: string
+  username?: string
+  message?: string
+  validation_mode?: string
+}
+
+interface TwitterAuthState extends TwitterRiskStateLike {
+  feature: string
+  selected_mode: string
+  default_mode: string
+  cookie_configured: boolean
+  cookie_validation_mode?: string
+  cookie_username?: string
+  configured_username?: string
+  active_username?: string
+  last_risk_event_at?: string
+}
+
+interface TwitterRiskAccount extends TwitterRiskAccountLike {
+  is_persisted: boolean
+  is_active_display_only: boolean
+  last_risk_event_at?: string
+}
+
+const twitterFeatureModes = [
+  { key: 'twitter_mode_test_connection', label: '连接测试' },
+  { key: 'twitter_mode_publish', label: '发帖' },
+  { key: 'twitter_mode_search', label: '搜索' },
+  { key: 'twitter_mode_reply', label: '回复' },
+  { key: 'twitter_mode_retweet', label: '转推' },
+  { key: 'twitter_mode_quote', label: '引用' },
+  { key: 'twitter_mode_mentions', label: '提及读取' },
+  { key: 'twitter_mode_tweet_lookup', label: '推文查询' },
+] as const
 
 export default function Settings() {
   const [settings, setSettings] = useState<Record<string, string>>({})
@@ -26,20 +73,122 @@ export default function Settings() {
   const [twitterPasswordSaved, setTwitterPasswordSaved] = useState(false)
   const [loggingIn, setLoggingIn] = useState(false)
   const [loginResult, setLoginResult] = useState<TestResult | null>(null)
+  const [cookieStatus, setCookieStatus] = useState<CookieStatus | null>(null)
+  const [authState, setAuthState] = useState<TwitterAuthState | null>(null)
+  const [riskAccounts, setRiskAccounts] = useState<TwitterRiskAccount[]>([])
+  const [resettingRiskAccount, setResettingRiskAccount] = useState<string | null>(null)
+  const [pageMessage, setPageMessage] = useState<PageMessage | null>(null)
+
+  const activeCookieUsername = cookieStatus?.username || cookieStatus?.account_name || ''
+  const hasAccountMismatch = Boolean(
+    activeCookieUsername &&
+    twitterUsername &&
+    activeCookieUsername !== twitterUsername
+  )
 
   useEffect(() => {
     loadSettings()
   }, [])
 
+  const refreshAuthState = async () => {
+    const [next, accounts] = await Promise.allSettled([
+      settingsApi.getTwitterAuthState(),
+      settingsApi.getTwitterRiskAccounts(),
+    ])
+
+    const nextAuthState = next.status === 'fulfilled' ? next.value : null
+    const nextRiskAccounts = accounts.status === 'fulfilled' ? accounts.value : []
+
+    setAuthState(nextAuthState)
+    setRiskAccounts(nextRiskAccounts)
+
+    if (next.status === 'rejected' || accounts.status === 'rejected') {
+      const firstError = next.status === 'rejected'
+        ? next.reason
+        : accounts.status === 'rejected'
+          ? accounts.reason
+          : null
+      setPageMessage({
+        tone: 'error',
+        title: '认证状态刷新失败',
+        message: formatTwitterActionError(firstError, '部分认证状态加载失败'),
+      })
+    }
+
+    return nextAuthState
+  }
+
   const loadSettings = async () => {
+    let hasFailure = false
+
     try {
-      const res = await settingsApi.get()
-      setSettings(res.settings)
-      if (res.settings.twitter_username) setTwitterUsername(res.settings.twitter_username)
-      if (res.settings.twitter_email) setTwitterEmail(res.settings.twitter_email)
-      if (res.settings.twitter_password_saved) setTwitterPasswordSaved(true)
+      setPageMessage(null)
+      const [res, authState, accounts] = await Promise.allSettled([
+        settingsApi.get(),
+        settingsApi.getTwitterAuthState(),
+        settingsApi.getTwitterRiskAccounts(),
+      ])
+
+      if (res.status === 'fulfilled') {
+        setSettings(res.value.settings)
+        if (res.value.settings.twitter_username) setTwitterUsername(res.value.settings.twitter_username)
+        if (res.value.settings.twitter_email) setTwitterEmail(res.value.settings.twitter_email)
+        if (res.value.settings.twitter_password_saved) setTwitterPasswordSaved(true)
+      } else {
+        hasFailure = true
+      }
+
+      const nextAuthState = authState.status === 'fulfilled' ? authState.value : null
+      const nextRiskAccounts = accounts.status === 'fulfilled' ? accounts.value : []
+
+      if (authState.status === 'fulfilled') {
+        setAuthState(nextAuthState)
+      } else {
+        hasFailure = true
+      }
+
+      if (accounts.status === 'fulfilled') {
+        setRiskAccounts(nextRiskAccounts)
+      } else {
+        hasFailure = true
+      }
+
+      if (nextAuthState?.cookie_configured) {
+        setCookieStatus({
+          configured: true,
+          username: nextAuthState.cookie_username || nextAuthState.active_username,
+          account_name: nextAuthState.cookie_username || nextAuthState.active_username,
+          validation_mode: nextAuthState.cookie_validation_mode,
+          is_valid: true,
+        })
+        if (nextAuthState.active_username) {
+          setTwitterUsername(nextAuthState.active_username)
+          setSettings((current) => ({ ...current, twitter_username: nextAuthState.active_username || '' }))
+        }
+      }
+
+      if (hasFailure) {
+        const firstError =
+          res.status === 'rejected'
+            ? res.reason
+            : authState.status === 'rejected'
+              ? authState.reason
+              : accounts.status === 'rejected'
+                ? accounts.reason
+                : null
+        setPageMessage({
+          tone: 'error',
+          title: '设置页部分数据加载失败',
+          message: formatTwitterActionError(firstError, '部分设置数据加载失败'),
+        })
+      }
     } catch (error) {
       console.error('Failed to load settings:', error)
+      setPageMessage({
+        tone: 'error',
+        title: '设置页加载失败',
+        message: formatTwitterActionError(error, '设置数据加载失败'),
+      })
     } finally {
       setLoading(false)
     }
@@ -50,10 +199,38 @@ export default function Settings() {
     try {
       await settingsApi.update(key, value)
       setSettings({ ...settings, [key]: value })
+      setPageMessage({
+        tone: 'success',
+        title: '设置已更新',
+        message: `配置项 ${key} 已保存。`,
+      })
     } catch (error) {
       console.error('Failed to save setting:', error)
+      setPageMessage({
+        tone: 'error',
+        title: '保存设置失败',
+        message: formatTwitterActionError(error, '保存设置失败'),
+      })
     } finally {
       setSaving(false)
+    }
+  }
+
+  const handleCookieStatusChange = (status: CookieStatus | null) => {
+    setCookieStatus(status)
+    if (!status?.configured) {
+      refreshAuthState()
+      setTwitterUsername('')
+      setSettings((current) => ({ ...current, twitter_username: '' }))
+      setLoginResult(null)
+      setTwitterTest(null)
+      return
+    }
+    refreshAuthState()
+    if (status.username || status.account_name) {
+      const activeUsername = status.username || status.account_name || ''
+      setTwitterUsername(activeUsername)
+      setSettings((current) => ({ ...current, twitter_username: activeUsername }))
     }
   }
 
@@ -72,9 +249,13 @@ export default function Settings() {
       if (res.success) {
         setTwitterPasswordSaved(true)
         setTwitterPassword('')
+        await refreshAuthState()
       }
     } catch (error) {
-      setLoginResult({ success: false, message: '登录请求失败' })
+      setLoginResult({
+        success: false,
+        message: formatTwitterActionError(error, '登录请求失败'),
+      })
     } finally {
       setLoggingIn(false)
     }
@@ -85,6 +266,7 @@ export default function Settings() {
     setTwitterTest(null)
     try {
       const res = await settingsApi.testTwitter()
+      await refreshAuthState()
       setTwitterTest({
         success: res.success,
         message: res.message,
@@ -93,7 +275,7 @@ export default function Settings() {
     } catch (error) {
       setTwitterTest({
         success: false,
-        message: '连接失败',
+        message: formatTwitterActionError(error, '连接失败'),
       })
     } finally {
       setTestingTwitter(false)
@@ -113,10 +295,32 @@ export default function Settings() {
     } catch (error) {
       setLlmTest({
         success: false,
-        message: '连接失败',
+        message: formatTwitterActionError(error, '连接失败'),
       })
     } finally {
       setTestingLLM(false)
+    }
+  }
+
+  const handleResetRiskAccount = async (accountKey: string) => {
+    setResettingRiskAccount(accountKey)
+    try {
+      const result = await settingsApi.resetTwitterRiskAccount(accountKey)
+      await refreshAuthState()
+      setPageMessage({
+        tone: result.removed ? 'success' : 'info',
+        title: result.removed ? '风控状态已重置' : '无需重置',
+        message: result.message,
+      })
+    } catch (error) {
+      console.error('Failed to reset risk account:', error)
+      setPageMessage({
+        tone: 'error',
+        title: '重置风控失败',
+        message: formatTwitterActionError(error, '重置风控失败'),
+      })
+    } finally {
+      setResettingRiskAccount(null)
     }
   }
 
@@ -135,12 +339,23 @@ export default function Settings() {
         <p className="text-muted-foreground">配置Twitter和LLM连接参数</p>
       </div>
 
+      {pageMessage && (
+        <InlineNotice
+          tone={pageMessage.tone}
+          title={pageMessage.title}
+          message={pageMessage.message}
+          dismissible
+          autoHideMs={pageMessage.tone === 'error' ? undefined : 4000}
+          onClose={() => setPageMessage(null)}
+        />
+      )}
+
       <div className="grid gap-6">
         <Card>
           <CardHeader>
             <CardTitle>Twitter配置</CardTitle>
             <CardDescription>
-              配置 Twitter 执行模式与账号登录信息
+              配置 Twitter 执行模式与认证方式。当前建议优先使用 Cookie 导入，Browser 密码登录仅作为补充排障手段。
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -160,11 +375,73 @@ export default function Settings() {
                 </p>
               </div>
 
+              <div className="pt-4 border-t space-y-3">
+                <div>
+                  <label className="text-sm font-medium">功能级模式路由</label>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    先保持默认全走 Twikit，后面可以按功能逐步切到 Browser 模式。
+                  </p>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {twitterFeatureModes.map((item) => (
+                    <div key={item.key}>
+                      <label className="text-xs font-medium text-muted-foreground">{item.label}</label>
+                      <select
+                        className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm mt-1"
+                        value={settings[item.key] || 'twikit'}
+                        onChange={(e) => handleSave(item.key, e.target.value)}
+                      >
+                        <option value="twikit">Twikit</option>
+                        <option value="browser">Browser</option>
+                      </select>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="pt-4 border-t">
+                <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                  <div className="font-medium">推荐认证顺序</div>
+                  <div className="mt-1">
+                    1. 先在下方导入 <code>auth_token</code> 和 <code>ct0</code>
+                    2. 用“测试 Cookies”确认可用
+                    3. 只有在 Cookie 不可用时，再尝试账号密码登录
+                  </div>
+                </div>
+              </div>
+
+              <div className="pt-2">
+                <TwitterCookieManager onStatusChange={handleCookieStatusChange} />
+              </div>
+
+              <TwitterRiskBanner state={authState} />
+
+              <TwitterRiskAccountPanel
+                items={riskAccounts}
+                activeUsername={authState?.active_username}
+                resettingKey={resettingRiskAccount}
+                onReset={handleResetRiskAccount}
+              />
+
               <div className="pt-4 border-t">
                 <label className="text-sm font-medium">Twitter 账号登录</label>
                 <p className="text-xs text-muted-foreground mb-3">
-                  输入账号信息登录，登录成功后凭证会自动保存
+                  仅在 Cookie 不可用时再尝试。若 Browser 模式提示 <code>399</code> 或 “Could not log you in now”，通常说明 X 拒绝当前密码登录环境，应回到 Cookie 方式。
                 </p>
+                {cookieStatus?.configured && (
+                  <div className="mb-3 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
+                    当前活跃认证账号：
+                    <span className="font-medium"> @{cookieStatus.username || cookieStatus.account_name}</span>
+                    {cookieStatus.validation_mode && `，认证方式：${cookieStatus.validation_mode}`}
+                  </div>
+                )}
+                {hasAccountMismatch && (
+                  <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                    检测到账号不一致：设置中的账号与当前 Cookie 生效账号不同。页面已优先按当前 Cookie 账号
+                    <span className="font-medium"> @{activeCookieUsername}</span>
+                    展示，请先清空旧 Cookie 或重新导入目标账号的 Cookie。
+                  </div>
+                )}
                 <div className="grid gap-3">
                   <Input
                     value={twitterUsername}
@@ -196,12 +473,19 @@ export default function Settings() {
                     登录 Twitter
                   </Button>
                   {loginResult && (
-                    <div className={`flex items-center gap-2 ${loginResult.success ? 'text-green-600' : 'text-red-600'}`}>
-                      {loginResult.success ? <CheckCircle className="h-4 w-4" /> : <XCircle className="h-4 w-4" />}
-                      <span className="text-sm">
-                        {loginResult.message}
-                        {loginResult.detail && ` (${loginResult.detail})`}
-                      </span>
+                    <div className={`flex items-start gap-2 ${loginResult.success ? 'text-green-600' : 'text-red-600'}`}>
+                      {loginResult.success ? <CheckCircle className="h-4 w-4 mt-0.5" /> : <XCircle className="h-4 w-4 mt-0.5" />}
+                      <div className="text-sm">
+                        <div>
+                          {loginResult.message}
+                          {loginResult.detail && ` (${loginResult.detail})`}
+                        </div>
+                        {!loginResult.success && (
+                          <div className="text-xs opacity-80 mt-1">
+                            Browser 登录失败时，优先改用 Cookie 导入；如果接口直接返回 502/500，请先检查 backend 日志与代理连通性。
+                          </div>
+                        )}
+                      </div>
                     </div>
                   )}
                 </div>
@@ -220,27 +504,31 @@ export default function Settings() {
 
               {twitterTest && (
                 <div
-                  className={`flex items-center gap-2 ${
+                  className={`flex items-start gap-2 ${
                     twitterTest.success ? 'text-green-600' : 'text-red-600'
                   }`}
                 >
                   {twitterTest.success ? (
-                    <CheckCircle className="h-4 w-4" />
+                    <CheckCircle className="h-4 w-4 mt-0.5" />
                   ) : (
-                    <XCircle className="h-4 w-4" />
+                    <XCircle className="h-4 w-4 mt-0.5" />
                   )}
-                  <span className="text-sm">
-                    {twitterTest.message}
-                    {twitterTest.detail && ` (${twitterTest.detail})`}
-                  </span>
+                  <div className="text-sm">
+                    <div>
+                      {twitterTest.message}
+                      {twitterTest.detail && ` (${twitterTest.detail})`}
+                    </div>
+                    {!twitterTest.success && (
+                      <div className="text-xs opacity-80 mt-1">
+                        连接测试失败不一定是代码问题，也可能是 Cookie 过期、代理异常、X 返回风控页，或 Browser 执行层未就绪。
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
             </div>
           </CardContent>
         </Card>
-
-        {/* Twitter Cookie Manager */}
-        <TwitterCookieManager />
 
         <Card>
           <CardHeader>

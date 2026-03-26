@@ -8,11 +8,15 @@ import asyncio
 from app.database import async_session
 from app.models.tweet import Tweet, TweetStatus
 from app.services.twitter_api import publish_tweet
-from app.services.tweet_guard import apply_publish_guard
+from app.services.tweet_guard import apply_publish_guard, is_publish_restricted_error
 from app.logger import setup_logger
 
 logger = setup_logger("scheduler")
 scheduler = AsyncIOScheduler()
+
+
+def should_skip_failed_retry(tweet: Tweet) -> bool:
+    return is_publish_restricted_error(getattr(tweet, 'error_message', None))
 
 
 async def check_scheduled_tweets():
@@ -71,13 +75,17 @@ async def retry_failed_tweets():
             logger.info("发现 %d 条失败推文待重试", len(tweets))
 
         for tweet in tweets:
-            tweet.status = TweetStatus.PUBLISHING
-            tweet.error_message = None
-            await db.commit()
+            if should_skip_failed_retry(tweet):
+                logger.warning("跳过重试推文 id=%d，上一轮失败属于账号受限或风控: %s", tweet.id, tweet.error_message)
+                continue
+
             logger.info("重试发布推文 id=%d（第 %d 次）", tweet.id, tweet.retry_count + 1)
 
             try:
                 await apply_publish_guard(tweet)
+                tweet.status = TweetStatus.PUBLISHING
+                tweet.error_message = None
+                await db.commit()
                 twitter_id = await publish_tweet(tweet)
                 tweet.status = TweetStatus.PUBLISHED
                 tweet.published_at = datetime.utcnow()

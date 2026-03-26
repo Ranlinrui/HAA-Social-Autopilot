@@ -1,9 +1,12 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { RefreshCw, Send, Loader2, ExternalLink, Bot, User, Settings, Power, PowerOff } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import api from '@/services/api'
+import { InlineNotice } from '@/components/InlineNotice'
+import api, { formatTwitterActionError } from '@/services/api'
+import { TwitterRiskBanner, getWriteBlockedReason, type TwitterRiskStateLike } from '@/components/TwitterRiskStatus'
+import { TwitterGuardedButton } from '@/components/TwitterGuardedButton'
 
 interface HistoryTurn {
   role: 'us' | 'them'
@@ -38,13 +41,20 @@ interface ConvSettings {
   poll_interval: number
   auto_reply_delay: number
   enabled: boolean
+  backoff_seconds?: number
+  backoff_until?: string
 }
 
-interface Stats {
+interface Stats extends TwitterRiskStateLike {
   total_threads: number
   pending_threads: number
   mode: string
   enabled: boolean
+  backoff_seconds?: number
+  backoff_until?: string
+  read_only_until?: string
+  auth_backoff_until?: string
+  recovery_until?: string
 }
 
 const STATUS_LABELS: Record<string, { label: string; className: string }> = {
@@ -59,6 +69,8 @@ export default function Conversations() {
   const [stats, setStats] = useState<Stats | null>(null)
   const [settings, setSettings] = useState<ConvSettings | null>(null)
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
+  const [actionMessage, setActionMessage] = useState<{ tone: 'error' | 'success' | 'info'; title: string; message: string } | null>(null)
   const [filterStatus, setFilterStatus] = useState<string>('pending')
   const [showSettings, setShowSettings] = useState(false)
 
@@ -72,40 +84,71 @@ export default function Conversations() {
   // Settings edit state
   const [editSettings, setEditSettings] = useState<Partial<ConvSettings>>({})
   const [savingSettings, setSavingSettings] = useState(false)
+  const writeBlockedReason = getWriteBlockedReason(stats)
+
+  const loadAll = useCallback(async () => {
+    let hasFailure = false
+
+    try {
+      setLoadError('')
+      const [threadsRes, statsRes, settingsRes] = await Promise.allSettled([
+        api.get(`/conversation/threads?status=${filterStatus}&limit=50`),
+        api.get('/conversation/stats'),
+        api.get('/conversation/settings'),
+      ])
+
+      if (threadsRes.status === 'fulfilled') {
+        setThreads(threadsRes.value.data)
+        setDrafts(prev => {
+          const newDrafts: Record<number, string> = {}
+          for (const t of threadsRes.value.data as Thread[]) {
+            if (t.draft_reply && !prev[t.id]) {
+              newDrafts[t.id] = t.draft_reply
+            }
+          }
+          return Object.keys(newDrafts).length > 0 ? { ...prev, ...newDrafts } : prev
+        })
+      } else {
+        hasFailure = true
+      }
+
+      if (statsRes.status === 'fulfilled') {
+        setStats(statsRes.value.data)
+      } else {
+        hasFailure = true
+      }
+
+      if (settingsRes.status === 'fulfilled') {
+        setSettings(settingsRes.value.data)
+        setEditSettings(settingsRes.value.data)
+      } else {
+        hasFailure = true
+      }
+
+      if (hasFailure) {
+        const firstError =
+          threadsRes.status === 'rejected'
+            ? threadsRes.reason
+            : statsRes.status === 'rejected'
+              ? statsRes.reason
+              : settingsRes.status === 'rejected'
+                ? settingsRes.reason
+                : null
+        setLoadError(formatTwitterActionError(firstError, '部分对话数据加载失败'))
+      }
+    } catch (e) {
+      console.error('Failed to load conversations:', e)
+      setLoadError(formatTwitterActionError(e, '对话数据加载失败'))
+    } finally {
+      setLoading(false)
+    }
+  }, [filterStatus])
 
   useEffect(() => {
     loadAll()
     const interval = setInterval(loadAll, 30000)
     return () => clearInterval(interval)
-  }, [filterStatus])
-
-  const loadAll = async () => {
-    try {
-      const [threadsRes, statsRes, settingsRes] = await Promise.all([
-        api.get(`/conversation/threads?status=${filterStatus}&limit=50`),
-        api.get('/conversation/stats'),
-        api.get('/conversation/settings'),
-      ])
-      setThreads(threadsRes.data)
-      setStats(statsRes.data)
-      setSettings(settingsRes.data)
-      setEditSettings(settingsRes.data)
-      // Pre-fill drafts from existing draft_reply
-      const newDrafts: Record<number, string> = {}
-      for (const t of threadsRes.data as Thread[]) {
-        if (t.draft_reply && !drafts[t.id]) {
-          newDrafts[t.id] = t.draft_reply
-        }
-      }
-      if (Object.keys(newDrafts).length > 0) {
-        setDrafts(prev => ({ ...prev, ...newDrafts }))
-      }
-    } catch (e) {
-      console.error('Failed to load conversations:', e)
-    } finally {
-      setLoading(false)
-    }
-  }
+  }, [loadAll])
 
   const handleGenerateDraft = async (thread: Thread) => {
     setGenerating(prev => ({ ...prev, [thread.id]: true }))
@@ -114,7 +157,7 @@ export default function Conversations() {
       const res = await api.post(`/conversation/threads/${thread.id}/generate-draft`)
       setDrafts(prev => ({ ...prev, [thread.id]: res.data.draft }))
     } catch (e: any) {
-      setErrors(prev => ({ ...prev, [thread.id]: e.response?.data?.detail || 'Failed to generate' }))
+      setErrors(prev => ({ ...prev, [thread.id]: formatTwitterActionError(e, '生成草稿失败') }))
     } finally {
       setGenerating(prev => ({ ...prev, [thread.id]: false }))
     }
@@ -130,7 +173,7 @@ export default function Conversations() {
       setDrafts(prev => ({ ...prev, [thread.id]: '' }))
       await loadAll()
     } catch (e: any) {
-      setErrors(prev => ({ ...prev, [thread.id]: e.response?.data?.detail || 'Failed to send' }))
+      setErrors(prev => ({ ...prev, [thread.id]: formatTwitterActionError(e, '发送回复失败') }))
     } finally {
       setSending(prev => ({ ...prev, [thread.id]: false }))
     }
@@ -140,8 +183,9 @@ export default function Conversations() {
     try {
       await api.post(`/conversation/threads/${threadId}/ignore`)
       await loadAll()
+      setActionMessage({ tone: 'success', title: '对话已忽略', message: '该对话已移出待处理列表。' })
     } catch (e) {
-      alert('Failed to ignore thread')
+      setActionMessage({ tone: 'error', title: '忽略对话失败', message: formatTwitterActionError(e, '忽略对话失败') })
     }
   }
 
@@ -150,8 +194,9 @@ export default function Conversations() {
     try {
       await api.patch(`/conversation/threads/${thread.id}/mode`, { mode: newMode })
       await loadAll()
+      setActionMessage({ tone: 'success', title: '对话模式已切换', message: `当前对话已切换为${newMode === 'auto' ? '自动' : '手动'}模式。` })
     } catch (e) {
-      alert('Failed to update mode')
+      setActionMessage({ tone: 'error', title: '切换模式失败', message: formatTwitterActionError(e, '切换模式失败') })
     }
   }
 
@@ -161,8 +206,9 @@ export default function Conversations() {
       await api.patch('/conversation/settings', editSettings)
       await loadAll()
       setShowSettings(false)
+      setActionMessage({ tone: 'success', title: '对话设置已保存', message: '新的轮询和回复配置已生效。' })
     } catch (e: any) {
-      alert(e.response?.data?.detail || 'Failed to save settings')
+      setActionMessage({ tone: 'error', title: '保存设置失败', message: formatTwitterActionError(e, '保存设置失败') })
     } finally {
       setSavingSettings(false)
     }
@@ -173,8 +219,9 @@ export default function Conversations() {
     try {
       await api.patch('/conversation/settings', { enabled: !settings.enabled })
       await loadAll()
+      setActionMessage({ tone: 'success', title: '轮询状态已更新', message: `对话轮询已${settings.enabled ? '暂停' : '启动'}。` })
     } catch (e) {
-      alert('Failed to toggle')
+      setActionMessage({ tone: 'error', title: '切换轮询状态失败', message: formatTwitterActionError(e, '切换开关失败') })
     }
   }
 
@@ -204,6 +251,30 @@ export default function Conversations() {
           </Button>
         </div>
       </div>
+
+      {actionMessage && (
+        <InlineNotice
+          tone={actionMessage.tone}
+          title={actionMessage.title}
+          message={actionMessage.message}
+          dismissible
+          autoHideMs={actionMessage.tone === 'error' ? undefined : 4000}
+          onClose={() => setActionMessage(null)}
+        />
+      )}
+
+      {loadError && (
+        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">
+          <div className="font-medium">对话页加载失败</div>
+          <div className="mt-1">{loadError}</div>
+          <div className="mt-2">
+            <Button type="button" variant="outline" size="sm" onClick={loadAll}>
+              <RefreshCw className="mr-2 h-4 w-4" />
+              重新加载
+            </Button>
+          </div>
+        </div>
+      )}
 
       {/* Stats */}
       {stats && (
@@ -240,6 +311,19 @@ export default function Conversations() {
           </Card>
         </div>
       )}
+
+      {stats && (stats.backoff_seconds || 0) > 0 && (
+        <Card className="border-amber-200 bg-amber-50">
+          <CardContent className="pt-6">
+            <p className="text-sm font-medium text-amber-900">对话跟进当前处于风控冷却期</p>
+            <p className="text-sm text-amber-800 mt-1">
+              剩余约 {Math.ceil((stats.backoff_seconds || 0) / 60)} 分钟，期间会暂停新的 mentions 轮询和自动回复。
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
+      <TwitterRiskBanner state={stats} />
 
       {/* Settings Panel */}
       {showSettings && settings && (
@@ -387,7 +471,7 @@ export default function Conversations() {
 
               {/* Auto error */}
               {thread.auto_error && (
-                <p className="text-xs text-destructive">自动回复失败: {thread.auto_error}</p>
+                <p className="text-xs text-destructive">自动回复失败: {formatTwitterActionError({ response: { data: { detail: thread.auto_error } } }, thread.auto_error)}</p>
               )}
 
               {/* Reply panel for pending threads */}
@@ -418,14 +502,16 @@ export default function Conversations() {
                       {generating[thread.id] ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
                       AI 生成
                     </button>
-                    <button
+                    <TwitterGuardedButton
                       onClick={() => handleSendReply(thread)}
                       disabled={sending[thread.id] || !drafts[thread.id]?.trim()}
-                      className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50"
-                    >
-                      {sending[thread.id] ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
-                      发送回复
-                    </button>
+                      loading={sending[thread.id]}
+                      icon={<Send className="h-3.5 w-3.5" />}
+                      label="发送回复"
+                      writeBlocked={!!stats?.write_blocked}
+                      writeBlockedReason={writeBlockedReason}
+                      className="h-auto gap-1.5 px-3 py-1.5 text-sm"
+                    />
                     <button
                       onClick={() => handleIgnore(thread.id)}
                       className="flex items-center gap-1.5 px-3 py-1.5 text-sm border rounded-md hover:bg-accent text-muted-foreground"

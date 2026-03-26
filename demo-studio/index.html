@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HAA Demo Studio</title>
+  <link rel="stylesheet" href="css/studio.css">
+</head>
+<body>
+  <!-- Background particles canvas -->
+  <canvas id="particles-bg"></canvas>
+
+  <!-- Main App Shell -->
+  <div id="app" class="app-shell">
+    <!-- Sidebar -->
+    <aside id="sidebar" class="sidebar">
+      <div class="sidebar-logo">
+        <span class="logo-icon">H</span>
+        <span class="logo-text">HAA Social Autopilot</span>
+      </div>
+      <nav class="sidebar-nav">
+        <a class="nav-item active" data-scene="monitor" onclick="switchScene('monitor')">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49m-8.48-.01a6 6 0 0 1 0-8.49m11.31-2.82a10 10 0 0 1 0 14.14m-14.14 0a10 10 0 0 1 0-14.14"/>
+          </svg>
+          <span>Account Monitor</span>
+        </a>
+        <a class="nav-item" data-scene="engage" onclick="switchScene('engage')">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+          </svg>
+          <span>Smart Engage</span>
+        </a>
+        <a class="nav-item" data-scene="dashboard" onclick="switchScene('dashboard')">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>
+          </svg>
+          <span>Data Overview</span>
+        </a>
+      </nav>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main id="main-content" class="main-content">
+      <!-- Header -->
+      <header class="main-header">
+        <div class="header-left">
+          <h1 id="scene-title">Account Monitor</h1>
+          <p id="scene-desc" class="text-muted">Real-time monitoring of KOL accounts</p>
+        </div>
+        <div class="header-right">
+          <div class="status-dot online"></div>
+          <span class="text-muted text-sm">System Online</span>
+        </div>
+      </header>
+
+      <!-- Scene: Monitor Storm -->
+      <section id="scene-monitor" class="scene active">
+        <!-- Stats Row -->
+        <div class="stats-grid">
+          <div class="stat-card" id="stat-accounts">
+            <div class="stat-label">Monitored Accounts</div>
+            <div class="stat-value" data-target="523">0</div>
+            <div class="stat-icon blue">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+            </div>
+          </div>
+          <div class="stat-card" id="stat-tweets">
+            <div class="stat-label">Tweets Today</div>
+            <div class="stat-value" data-target="1847">0</div>
+            <div class="stat-icon green">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 4s-.7 2.1-2 3.4c1.6 10-9.4 17.3-18 11.6 2.2.1 4.4-.6 6-2C3 15.5.5 9.6 3 5c2.2 2.6 5.6 4.1 9 4-.9-4.2 4-6.6 7-3.8 1.1 0 3-1.2 3-1.2z"/></svg>
+            </div>
+          </div>
+          <div class="stat-card" id="stat-replies">
+            <div class="stat-label">AI Replies Sent</div>
+            <div class="stat-value" data-target="892">0</div>
+            <div class="stat-icon purple">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            </div>
+          </div>
+          <div class="stat-card" id="stat-success">
+            <div class="stat-label">Success Rate</div>
+            <div class="stat-value" data-target="99.2" data-suffix="%">0%</div>
+            <div class="stat-icon emerald">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+            </div>
+          </div>
+        </div>
+
+        <!-- Monitor Feed -->
+        <div class="monitor-layout">
+          <!-- Left: Notification Feed -->
+          <div class="feed-panel">
+            <div class="panel-header">
+              <h3>Live Feed</h3>
+              <span class="badge pulse-badge">LIVE</span>
+            </div>
+            <div id="notification-feed" class="notification-feed"></div>
+          </div>
+          <!-- Right: Activity Log -->
+          <div class="log-panel">
+            <div class="panel-header">
+              <h3>Activity Log</h3>
+              <span class="text-muted text-sm" id="log-count">0 events</span>
+            </div>
+            <div id="activity-log" class="activity-log"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Scene: Engage Order Flow -->
+      <section id="scene-engage" class="scene"></section>
+
+      <!-- Scene: Data Dashboard -->
+      <section id="scene-dashboard" class="scene"></section>
+    </main>
+  </div>
+
+  <!-- Director Control Panel (press D to toggle, hidden during recording) -->
+  <div id="director-panel" class="director-panel">
+    <div class="director-body" id="director-body">
+      <div class="director-section">
+        <label>Speed</label>
+        <div class="btn-group">
+          <button class="dir-btn" onclick="setSpeed(0.5)">Slow</button>
+          <button class="dir-btn active" onclick="setSpeed(1)">Normal</button>
+          <button class="dir-btn" onclick="setSpeed(2)">Fast</button>
+        </div>
+      </div>
+      <div class="director-section">
+        <label>Scale</label>
+        <div class="btn-group">
+          <button class="dir-btn" onclick="setScale('small')">Small</button>
+          <button class="dir-btn active" onclick="setScale('medium')">Medium</button>
+          <button class="dir-btn" onclick="setScale('large')">Large</button>
+        </div>
+      </div>
+      <div class="director-section">
+        <label>Actions</label>
+        <div class="btn-group">
+          <button class="dir-btn accent" onclick="triggerSurge()">Surge</button>
+          <button class="dir-btn accent" onclick="triggerBatchComplete()">Batch</button>
+        </div>
+      </div>
+      <div class="director-section">
+        <label>Control</label>
+        <div class="btn-group">
+          <button class="dir-btn wide" id="btn-play" onclick="togglePlay()">Start</button>
+          <button class="dir-btn danger" onclick="resetScene()">Reset</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/generators/usernames.js"></script>
+  <script src="js/generators/tweets.js"></script>
+  <script src="js/generators/numbers.js"></script>
+  <script src="js/effects/animations.js"></script>
+  <script src="js/effects/particles.js"></script>
+  <script src="js/scenes/monitor.js"></script>
+  <script src="js/scenes/engage.js"></script>
+  <script src="js/scenes/dashboard.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

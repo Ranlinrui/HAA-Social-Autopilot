@@ -1,6 +1,5 @@
 import { NavLink } from 'react-router-dom'
 import {
-  LayoutDashboard,
   FileText,
   Calendar,
   Image,
@@ -16,7 +15,6 @@ import { useUIStore } from '@/stores'
 import { cn } from '@/lib/utils'
 
 const navItems = [
-  { icon: LayoutDashboard, label: '数据看板', path: '/' },
   { icon: FileText, label: '推文管理', path: '/tweets' },
   { icon: Calendar, label: '排期日历', path: '/calendar' },
   { icon: Image, label: '素材库', path: '/media' },

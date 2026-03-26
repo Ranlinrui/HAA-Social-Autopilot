@@ -20,6 +20,15 @@ RANDOM_DELAY_RANGE = (30, 120)
 SIMILARITY_THRESHOLD = 0.92
 SIMILAR_LOOKBACK_HOURS = 24
 PENALTY_226_HOURS = 12
+RESTRICTED_ERROR_MARKERS = (
+    '226',
+    'automated',
+    'authorizationerror',
+    'missing twitterusernotsuspended',
+    'denied by access control',
+    '[37]',
+    ' code 37',
+)
 
 
 @dataclass
@@ -45,6 +54,11 @@ def _is_similar(content_a: str, content_b: str) -> bool:
 
 def _has_media(tweet: Tweet) -> bool:
     return bool(getattr(tweet, 'media_items', None))
+
+
+def is_publish_restricted_error(message: str | None) -> bool:
+    normalized = (message or '').lower()
+    return any(marker in normalized for marker in RESTRICTED_ERROR_MARKERS)
 
 
 async def evaluate_publish_guard(tweet: Tweet) -> GuardDecision:
@@ -75,9 +89,8 @@ async def evaluate_publish_guard(tweet: Tweet) -> GuardDecision:
             .limit(5)
         )
         for failed in recent_failed.scalars().all():
-            msg = (failed.error_message or '').lower()
-            if '226' in msg or 'automated' in msg or 'authorizationerror' in msg:
-                return GuardDecision(False, '账号近期触发 226 风控，建议至少等待 12 小时后再发帖')
+            if is_publish_restricted_error(failed.error_message):
+                return GuardDecision(False, '账号近期触发风控或账号受限，建议至少等待 12 小时后再发帖')
 
         recent_published = await db.execute(
             select(Tweet)

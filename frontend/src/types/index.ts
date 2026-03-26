@@ -63,6 +63,14 @@ export interface GenerateResponse {
 
 export interface Settings {
   twitter_publish_mode: string
+  twitter_mode_test_connection: string
+  twitter_mode_publish: string
+  twitter_mode_search: string
+  twitter_mode_reply: string
+  twitter_mode_retweet: string
+  twitter_mode_quote: string
+  twitter_mode_mentions: string
+  twitter_mode_tweet_lookup: string
   llm_model: string
   llm_api_base: string
   [key: string]: string

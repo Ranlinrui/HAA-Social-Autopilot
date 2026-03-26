@@ -1,11 +1,13 @@
-import { useEffect, useState } from 'react'
-import { Plus, Trash2, Send, Clock, Sparkles, ImagePlus, X, Check, Video } from 'lucide-react'
+import { useCallback, useEffect, useState } from 'react'
+import { Plus, Trash2, Send, Clock, Sparkles, ImagePlus, X, Check, Video, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { InlineConfirm } from '@/components/InlineConfirm'
+import { InlineNotice } from '@/components/InlineNotice'
 import { Textarea } from '@/components/ui/textarea'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
-import { tweetsApi, llmApi, mediaApi } from '@/services/api'
+import { tweetsApi, llmApi, mediaApi, formatTwitterActionError } from '@/services/api'
 import { useTweetStore } from '@/stores'
 import { formatDate, getStatusColor, getStatusText } from '@/lib/utils'
 import type { LLMTemplate, Media } from '@/types'
@@ -19,14 +21,21 @@ export default function Tweets() {
   const [showCreate, setShowCreate] = useState(false)
   const [content, setContent] = useState('')
   const [templates, setTemplates] = useState<LLMTemplate[]>([])
+  const [templatesLoaded, setTemplatesLoaded] = useState(false)
+  const [templatesLoading, setTemplatesLoading] = useState(false)
   const [selectedTemplate, setSelectedTemplate] = useState('')
   const [topic, setTopic] = useState('')
   const [generating, setGenerating] = useState(false)
+  const [loadError, setLoadError] = useState('')
+  const [actionMessage, setActionMessage] = useState<{ tone: 'error' | 'success' | 'info'; title: string; message: string } | null>(null)
   const [scheduling, setScheduling] = useState<number | null>(null)
   const [scheduleTime, setScheduleTime] = useState('')
+  const [pendingDeleteId, setPendingDeleteId] = useState<number | null>(null)
 
   const [showMediaPicker, setShowMediaPicker] = useState(false)
   const [mediaList, setMediaList] = useState<Media[]>([])
+  const [mediaLoaded, setMediaLoaded] = useState(false)
+  const [mediaLoading, setMediaLoading] = useState(false)
   const [selectedMediaIds, setSelectedMediaIds] = useState<number[]>([])
 
   const selectedMedia = selectedMediaIds
@@ -34,38 +43,51 @@ export default function Tweets() {
     .filter((item): item is Media => Boolean(item))
   const hasSelectedVideo = selectedMedia.some((item) => item.media_type === 'video')
 
-  useEffect(() => {
-    loadTweets()
-    loadTemplates()
-  }, [])
-
-  const loadTweets = async () => {
+  const loadTweets = useCallback(async () => {
     setLoading(true)
     try {
+      setLoadError('')
       const res = await tweetsApi.list()
       setTweets(res.items, res.total)
     } catch (error) {
       console.error('Failed to load tweets:', error)
+      setLoadError(formatTwitterActionError(error, '推文列表加载失败'))
     } finally {
       setLoading(false)
     }
-  }
+  }, [setLoading, setTweets])
+
+  useEffect(() => {
+    loadTweets()
+  }, [loadTweets])
 
   const loadTemplates = async () => {
+    if (templatesLoaded || templatesLoading) return
+    setTemplatesLoading(true)
     try {
       const res = await llmApi.getTemplates()
       setTemplates(res)
+      setTemplatesLoaded(true)
     } catch (error) {
       console.error('Failed to load templates:', error)
+      setActionMessage({ tone: 'error', title: '模板加载失败', message: formatTwitterActionError(error, 'AI 模板加载失败') })
+    } finally {
+      setTemplatesLoading(false)
     }
   }
 
   const loadMediaList = async () => {
+    if (mediaLoaded || mediaLoading) return
+    setMediaLoading(true)
     try {
       const res = await mediaApi.list()
       setMediaList(res.items)
+      setMediaLoaded(true)
     } catch (error) {
       console.error('Failed to load media:', error)
+      setActionMessage({ tone: 'error', title: '素材列表加载失败', message: formatTwitterActionError(error, '素材列表加载失败') })
+    } finally {
+      setMediaLoading(false)
     }
   }
 
@@ -82,18 +104,18 @@ export default function Tweets() {
 
       if (media.media_type === 'video') {
         if (selectedItems.length > 0) {
-          alert('视频推文当前仅支持单个视频，已替换掉之前选择的素材。')
+          setActionMessage({ tone: 'info', title: '素材选择已调整', message: '视频推文当前仅支持单个视频，已替换掉之前选择的素材。' })
         }
         return [media.id]
       }
 
       if (alreadyHasVideo) {
-        alert('单条推文不能同时混用视频和图片，请先移除已选视频。')
+        setActionMessage({ tone: 'error', title: '素材选择无效', message: '单条推文不能同时混用视频和图片，请先移除已选视频。' })
         return prev
       }
 
       if (prev.length >= 4) {
-        alert('图片素材最多选择 4 张。')
+        setActionMessage({ tone: 'error', title: '素材数量超限', message: '图片素材最多选择 4 张。' })
         return prev
       }
 
@@ -116,19 +138,22 @@ export default function Tweets() {
       setSelectedMediaIds([])
       setShowMediaPicker(false)
       setShowCreate(false)
+      setActionMessage({ tone: 'success', title: '推文已创建', message: '草稿已保存到推文列表。' })
     } catch (error) {
       console.error('Failed to create tweet:', error)
+      setActionMessage({ tone: 'error', title: '创建推文失败', message: formatTwitterActionError(error, '创建推文失败') })
     }
   }
 
   const handleDelete = async (id: number) => {
-    if (!confirm('确定要删除这条推文吗?')) return
-
     try {
       await tweetsApi.delete(id)
       removeTweet(id)
+      setPendingDeleteId(null)
+      setActionMessage({ tone: 'success', title: '推文已删除', message: '该推文已从列表中移除。' })
     } catch (error) {
       console.error('Failed to delete tweet:', error)
+      setActionMessage({ tone: 'error', title: '删除推文失败', message: formatTwitterActionError(error, '删除推文失败') })
     }
   }
 
@@ -136,8 +161,10 @@ export default function Tweets() {
     try {
       const tweet = await tweetsApi.publish(id)
       updateTweet(tweet)
+      setActionMessage({ tone: 'success', title: '推文已发布', message: '推文已成功发送到 X/Twitter。' })
     } catch (error) {
       console.error('Failed to publish tweet:', error)
+      setActionMessage({ tone: 'error', title: '发布失败', message: formatTwitterActionError(error, '发布失败') })
     }
   }
 
@@ -149,8 +176,10 @@ export default function Tweets() {
       updateTweet(tweet)
       setScheduling(null)
       setScheduleTime('')
+      setActionMessage({ tone: 'success', title: '排期已保存', message: '推文定时发布设置已更新。' })
     } catch (error) {
       console.error('Failed to schedule tweet:', error)
+      setActionMessage({ tone: 'error', title: '设置定时发布失败', message: formatTwitterActionError(error, '设置定时发布失败') })
     }
   }
 
@@ -164,8 +193,10 @@ export default function Tweets() {
         template_id: selectedTemplate || undefined,
       })
       setContent(res.content)
+      setActionMessage({ tone: 'success', title: '草稿已生成', message: 'AI 已生成推文内容，可继续编辑后发布。' })
     } catch (error) {
       console.error('Failed to generate content:', error)
+      setActionMessage({ tone: 'error', title: 'AI 生成失败', message: '请检查 LLM 配置或稍后重试。' })
     } finally {
       setGenerating(false)
     }
@@ -186,11 +217,50 @@ export default function Tweets() {
           <h2 className="text-2xl font-bold">推文管理</h2>
           <p className="text-muted-foreground">管理和发布你的推文内容</p>
         </div>
-        <Button onClick={() => setShowCreate(true)}>
+        <Button
+          onClick={async () => {
+            setShowCreate(true)
+            await loadTemplates()
+          }}
+        >
           <Plus className="h-4 w-4 mr-2" />
           新建推文
         </Button>
       </div>
+
+      {actionMessage && (
+        <InlineNotice
+          tone={actionMessage.tone}
+          title={actionMessage.title}
+          message={actionMessage.message}
+          dismissible
+          autoHideMs={actionMessage.tone === 'error' ? undefined : 4000}
+          onClose={() => setActionMessage(null)}
+        />
+      )}
+
+      {pendingDeleteId !== null && (
+        <InlineConfirm
+          title="确认删除推文"
+          message="删除后该推文草稿或失败记录将从当前列表中移除。"
+          confirmLabel="确认删除"
+          onConfirm={() => handleDelete(pendingDeleteId)}
+          onCancel={() => setPendingDeleteId(null)}
+        />
+      )}
+
+      {loadError && (
+        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">
+          <div className="font-medium">推文页加载失败</div>
+          <div className="mt-1">{loadError}</div>
+          <div className="mt-2">
+            <Button type="button" variant="outline" size="sm" onClick={loadTweets}>
+              <RefreshCw className="mr-2 h-4 w-4" />
+              重新加载
+            </Button>
+          </div>
+        </div>
+      )}
 
       {showCreate && (
         <Card>
@@ -209,14 +279,14 @@ export default function Tweets() {
                 value={selectedTemplate}
                 onChange={(e) => setSelectedTemplate(e.target.value)}
               >
-                <option value="">选择素材类型...</option>
+                <option value="">{templatesLoading ? '模板加载中...' : '选择素材类型...'}</option>
                 {templates.map((t) => (
                   <option key={t.id} value={t.id} title={t.description}>
                     {t.name}
                   </option>
                 ))}
               </select>
-              <Button onClick={handleGenerate} disabled={generating || !topic.trim()}>
+              <Button onClick={handleGenerate} disabled={generating || !topic.trim() || templatesLoading}>
                 <Sparkles className="h-4 w-4 mr-2" />
                 {generating ? '生成中...' : 'AI生成'}
               </Button>
@@ -270,7 +340,9 @@ export default function Tweets() {
                     <X className="h-4 w-4" />
                   </button>
                 </div>
-                {mediaList.length === 0 ? (
+                {mediaLoading ? (
+                  <p className="text-sm text-muted-foreground py-4 text-center">素材加载中...</p>
+                ) : mediaList.length === 0 ? (
                   <p className="text-sm text-muted-foreground py-4 text-center">
                     素材库为空，请先到素材库上传图片或视频
                   </p>
@@ -324,9 +396,12 @@ export default function Tweets() {
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => {
-                    setShowMediaPicker((v) => !v)
-                    if (!showMediaPicker) loadMediaList()
+                  onClick={async () => {
+                    const nextOpen = !showMediaPicker
+                    setShowMediaPicker(nextOpen)
+                    if (nextOpen) {
+                      await loadMediaList()
+                    }
                   }}
                 >
                   <ImagePlus className="h-4 w-4 mr-1" />
@@ -405,7 +480,7 @@ export default function Tweets() {
                       {tweet.published_at && <span>发布于 {formatDate(tweet.published_at)}</span>}
                     </div>
                     {tweet.error_message && (
-                      <p className="text-sm text-red-500 mt-1">{tweet.error_message}</p>
+                      <p className="text-sm text-red-500 mt-1">{formatTwitterActionError({ response: { data: { detail: tweet.error_message } } }, tweet.error_message)}</p>
                     )}
                   </div>
 
@@ -451,7 +526,7 @@ export default function Tweets() {
                     )}
 
                     {(tweet.status === 'draft' || tweet.status === 'failed') && (
-                      <Button size="sm" variant="ghost" onClick={() => handleDelete(tweet.id)}>
+                      <Button size="sm" variant="ghost" onClick={() => setPendingDeleteId(tweet.id)}>
                         <Trash2 className="h-4 w-4 text-red-500" />
                       </Button>
                     )}

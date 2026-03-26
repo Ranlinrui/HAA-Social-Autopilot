@@ -7,6 +7,10 @@ from app.services.llm_service import generate_tweet_content
 router = APIRouter(prefix="/api/llm", tags=["llm"])
 
 
+def _error_detail(exc: Exception) -> str:
+    return str(exc).strip() or exc.__class__.__name__
+
+
 class GenerateRequest(BaseModel):
     topic: str
     style: Optional[str] = "professional"
@@ -218,4 +222,4 @@ async def generate_content(request: GenerateRequest):
 
         return GenerateResponse(content=content, tokens_used=tokens)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_error_detail(e))

@@ -10,6 +10,15 @@ import asyncio
 import logging
 import random
 from datetime import datetime, timezone
+
+from app.services.twitter_auth_backoff import (
+    build_auth_backoff_until,
+    build_automation_backoff_until,
+    is_auth_failure,
+    is_automation_failure,
+    is_backoff_active,
+    seconds_until_backoff_expires,
+)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -129,6 +138,7 @@ class ConversationService:
     def __init__(self):
         self.is_running = False
         self.poll_task = None
+        self.auth_backoff_until = None
 
     async def start(self):
         if self.is_running:
@@ -160,6 +170,11 @@ class ConversationService:
     async def _poll_loop(self):
         global _last_seen_notification_id
         while self.is_running:
+            if is_backoff_active(self.auth_backoff_until):
+                remaining = seconds_until_backoff_expires(self.auth_backoff_until)
+                await asyncio.sleep(min(60, max(10, remaining)))
+                continue
+
             try:
                 async for db in get_db():
                     cfg = await self._get_settings(db)
@@ -186,6 +201,20 @@ class ConversationService:
         try:
             mentions = await get_mentions(count=40)
         except Exception as e:
+            if is_auth_failure(e):
+                self.auth_backoff_until = build_auth_backoff_until()
+                logger.warning(
+                    "Twitter auth failed while polling mentions, entering conversation backoff until %s",
+                    self.auth_backoff_until.isoformat(),
+                )
+                return
+            if is_automation_failure(e):
+                self.auth_backoff_until = build_automation_backoff_until()
+                logger.warning(
+                    "Twitter automation risk triggered while polling mentions, entering conversation backoff until %s",
+                    self.auth_backoff_until.isoformat(),
+                )
+                return
             logger.warning("Could not fetch mentions: %s", e)
             return
 
@@ -368,7 +397,15 @@ class ConversationService:
                 await db.commit()
                 logger.info("Auto-replied to thread %d, reply_id=%s", thread_id, reply_id)
             except Exception as e:
-                logger.error("Auto-reply failed for thread %d: %s", thread_id, e)
+                if is_automation_failure(e):
+                    self.auth_backoff_until = build_automation_backoff_until()
+                    logger.warning(
+                        "Twitter automation risk triggered while auto-replying thread %d, entering conversation backoff until %s",
+                        thread_id,
+                        self.auth_backoff_until.isoformat(),
+                    )
+                else:
+                    logger.error("Auto-reply failed for thread %d: %s", thread_id, e)
                 try:
                     result = await db.execute(
                         select(ConversationThread).where(ConversationThread.id == thread_id)

@@ -4,8 +4,10 @@ import { useDropzone } from 'react-dropzone'
 import { Upload, Trash2, Image as ImageIcon, Video } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
+import { InlineConfirm } from '@/components/InlineConfirm'
+import { InlineNotice } from '@/components/InlineNotice'
 import { Badge } from '@/components/ui/badge'
-import { mediaApi } from '@/services/api'
+import { mediaApi, formatTwitterActionError } from '@/services/api'
 import { useMediaStore } from '@/stores'
 import { formatFileSize } from '@/lib/utils'
 
@@ -17,22 +19,27 @@ export default function Media() {
 
   const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState('')
+  const [loadError, setLoadError] = useState('')
+  const [actionMessage, setActionMessage] = useState<{ tone: 'error' | 'success' | 'info'; title: string; message: string } | null>(null)
+  const [pendingDeleteId, setPendingDeleteId] = useState<number | null>(null)
 
-  useEffect(() => {
-    loadMedia()
-  }, [])
-
-  const loadMedia = async () => {
+  const loadMedia = useCallback(async () => {
     setLoading(true)
     try {
+      setLoadError('')
       const res = await mediaApi.list()
       setMediaList(res.items, res.total)
     } catch (error) {
       console.error('Failed to load media:', error)
+      setLoadError(formatTwitterActionError(error, '素材列表加载失败'))
     } finally {
       setLoading(false)
     }
-  }
+  }, [setLoading, setMediaList])
+
+  useEffect(() => {
+    loadMedia()
+  }, [loadMedia])
 
   const onDrop = useCallback(
     async (acceptedFiles: File[]) => {
@@ -46,8 +53,8 @@ export default function Media() {
       } catch (error) {
         console.error('Failed to upload file:', error)
         const message = error instanceof AxiosError
-          ? error.response?.data?.detail || error.message
-          : '上传失败，请稍后重试'
+          ? formatTwitterActionError({ response: error.response, message: error.message }, '上传失败，请稍后重试')
+          : formatTwitterActionError({ message: error instanceof Error ? error.message : String(error || '') }, '上传失败，请稍后重试')
         setUploadError(String(message))
       } finally {
         setUploading(false)
@@ -78,13 +85,14 @@ export default function Media() {
   })
 
   const handleDelete = async (id: number) => {
-    if (!confirm('确定要删除这个素材吗?')) return
-
     try {
       await mediaApi.delete(id)
       removeMedia(id)
+      setPendingDeleteId(null)
+      setActionMessage({ tone: 'success', title: '素材已删除', message: '该素材已从素材库移除。' })
     } catch (error) {
       console.error('Failed to delete media:', error)
+      setActionMessage({ tone: 'error', title: '删除素材失败', message: formatTwitterActionError(error, '删除素材失败') })
     }
   }
 
@@ -102,6 +110,39 @@ export default function Media() {
         <h2 className="text-2xl font-bold">素材库</h2>
         <p className="text-muted-foreground">管理图片和视频素材</p>
       </div>
+
+      {actionMessage && (
+        <InlineNotice
+          tone={actionMessage.tone}
+          title={actionMessage.title}
+          message={actionMessage.message}
+          dismissible
+          autoHideMs={actionMessage.tone === 'error' ? undefined : 4000}
+          onClose={() => setActionMessage(null)}
+        />
+      )}
+
+      {pendingDeleteId !== null && (
+        <InlineConfirm
+          title="确认删除素材"
+          message="删除后该图片或视频将从素材库移除，相关草稿里也无法再继续引用它。"
+          confirmLabel="确认删除"
+          onConfirm={() => handleDelete(pendingDeleteId)}
+          onCancel={() => setPendingDeleteId(null)}
+        />
+      )}
+
+      {loadError && (
+        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">
+          <div className="font-medium">素材页加载失败</div>
+          <div className="mt-1">{loadError}</div>
+          <div className="mt-2">
+            <Button type="button" variant="outline" size="sm" onClick={loadMedia}>
+              重新加载
+            </Button>
+          </div>
+        </div>
+      )}
 
       <Card>
         <CardContent className="p-6">
@@ -170,7 +211,7 @@ export default function Media() {
                   <Button
                     size="icon"
                     variant="destructive"
-                    onClick={() => handleDelete(media.id)}
+                    onClick={() => setPendingDeleteId(media.id)}
                   >
                     <Trash2 className="h-4 w-4" />
                   </Button>

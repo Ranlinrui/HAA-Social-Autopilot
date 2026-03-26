@@ -3,7 +3,7 @@ import { Calendar as CalendarIcon, ChevronLeft, ChevronRight } from 'lucide-reac
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { tweetsApi } from '@/services/api'
+import { tweetsApi, formatTwitterActionError } from '@/services/api'
 import type { Tweet } from '@/types'
 import { getStatusColor, getStatusText } from '@/lib/utils'
 
@@ -11,6 +11,7 @@ export default function CalendarPage() {
   const [tweets, setTweets] = useState<Tweet[]>([])
   const [currentDate, setCurrentDate] = useState(new Date())
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
 
   useEffect(() => {
     loadTweets()
@@ -18,10 +19,12 @@ export default function CalendarPage() {
 
   const loadTweets = async () => {
     try {
+      setLoadError('')
       const res = await tweetsApi.list('scheduled', 0, 100)
       setTweets(res.items)
     } catch (error) {
       console.error('Failed to load scheduled tweets:', error)
+      setLoadError(formatTwitterActionError(error, '排期日历加载失败'))
     } finally {
       setLoading(false)
     }
@@ -92,6 +95,18 @@ export default function CalendarPage() {
           </span>
         </div>
       </div>
+
+      {loadError && (
+        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">
+          <div className="font-medium">排期页加载失败</div>
+          <div className="mt-1">{loadError}</div>
+          <div className="mt-2">
+            <Button type="button" variant="outline" size="sm" onClick={loadTweets}>
+              重新加载
+            </Button>
+          </div>
+        </div>
+      )}
 
       <Card>
         <CardHeader>

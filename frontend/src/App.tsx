@@ -1,6 +1,5 @@
-import { BrowserRouter, Routes, Route } from 'react-router-dom'
+import { BrowserRouter, Navigate, Routes, Route } from 'react-router-dom'
 import Layout from '@/components/Layout'
-import Dashboard from '@/pages/Dashboard'
 import Tweets from '@/pages/Tweets'
 import CalendarPage from '@/pages/Calendar'
 import Media from '@/pages/Media'
@@ -14,7 +13,7 @@ export default function App() {
     <BrowserRouter>
       <Routes>
         <Route element={<Layout />}>
-          <Route path="/" element={<Dashboard />} />
+          <Route path="/" element={<Navigate to="/tweets" replace />} />
           <Route path="/tweets" element={<Tweets />} />
           <Route path="/calendar" element={<CalendarPage />} />
           <Route path="/media" element={<Media />} />

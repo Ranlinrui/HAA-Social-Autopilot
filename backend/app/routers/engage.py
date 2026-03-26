@@ -14,8 +14,14 @@ from app.database import get_db
 from app.models.engage import EngageReply
 from app.services.twitter_api import search_tweets, reply_tweet, retweet_tweet, quote_tweet
 from app.services.llm_service import generate_tweet_content
+from app.services.twitter_risk_control import get_twitter_risk_control
 
 router = APIRouter(prefix="/api/engage", tags=["engage"])
+
+
+def _error_detail(exc: Exception, prefix: str | None = None) -> str:
+    message = str(exc).strip() or exc.__class__.__name__
+    return f"{prefix}: {message}" if prefix else message
 
 
 class SearchRequest(BaseModel):
@@ -53,11 +59,18 @@ class ReplyRequest(BaseModel):
 async def search_hot_tweets(body: SearchRequest):
     try:
         results = await search_tweets(body.query, body.count)
-        return results
+        normalized_results = []
+        for item in results:
+            row = dict(item)
+            view_count = row.get("view_count")
+            if view_count is not None:
+                row["view_count"] = str(view_count)
+            normalized_results.append(row)
+        return normalized_results
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=_error_detail(e, "搜索失败"))
 
 
 @router.get("/replied-ids")
@@ -148,7 +161,7 @@ Output only the reply, nothing else."""
         )
         return {"content": content}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_error_detail(e))
 
 
 @router.post("/reply/{tweet_id}")
@@ -169,7 +182,7 @@ async def post_reply(tweet_id: str, body: ReplyRequest, db: AsyncSession = Depen
             await db.commit()
         return {"success": True, "reply_id": reply_id}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_error_detail(e))
 
 
 UPLOAD_DIR = "/app/uploads"
@@ -186,7 +199,7 @@ async def post_quote(body: QuoteRequest):
         tweet_id = await quote_tweet(body.tweet_url, body.content)
         return {"success": True, "tweet_id": tweet_id}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_error_detail(e))
 
 
 @router.post("/quote-with-media")
@@ -209,7 +222,7 @@ async def post_quote_with_media(
         tweet_id = await quote_tweet(tweet_url, content, saved_paths)
         return {"success": True, "tweet_id": tweet_id}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_error_detail(e))
     finally:
         for p in saved_paths:
             try:
@@ -224,7 +237,7 @@ async def post_retweet(tweet_id: str):
         await retweet_tweet(tweet_id)
         return {"success": True}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_error_detail(e))
 
 
 class BatchReplyItem(BaseModel):
@@ -250,15 +263,30 @@ class BatchReplyResult(BaseModel):
 
 @router.post("/batch-reply", response_model=List[BatchReplyResult])
 async def batch_reply(body: BatchReplyRequest, db: AsyncSession = Depends(get_db)):
+    from app.services.twitter_api import get_active_auth_state
+
     results: List[BatchReplyResult] = []
     consecutive_rate_limits = 0  # Track back-to-back 226 errors
+    risk_control = get_twitter_risk_control()
+    auth_state = await get_active_auth_state("reply")
+    account_key = auth_state.get("active_username")
 
     for i, item in enumerate(body.items):
+        state = risk_control.get_state(account_key)
+        if state["write_blocked"]:
+            results.append(BatchReplyResult(
+                tweet_id=item.tweet_id,
+                success=False,
+                error=state["write_block_reason"] or "当前账号处于写入保护期",
+                aborted=True,
+            ))
+            continue
+
         # If two consecutive 226s, abort the rest of the batch
         if consecutive_rate_limits >= 2:
             results.append(BatchReplyResult(
                 tweet_id=item.tweet_id, success=False,
-                error="Aborted: rate limit detected, try again later",
+                error="已中止：检测到频率限制，请稍后再试",
                 aborted=True
             ))
             continue
@@ -288,7 +316,7 @@ async def batch_reply(body: BatchReplyRequest, db: AsyncSession = Depends(get_db
                 await db.commit()
             results.append(BatchReplyResult(tweet_id=item.tweet_id, success=True, reply_id=reply_id))
         except Exception as e:
-            error_str = str(e)
+            error_str = _error_detail(e)
             # Detect 226 rate-limit / automation detection
             if "226" in error_str or "automated" in error_str.lower():
                 consecutive_rate_limits += 1
@@ -298,5 +326,8 @@ async def batch_reply(body: BatchReplyRequest, db: AsyncSession = Depends(get_db
             else:
                 consecutive_rate_limits = 0
             results.append(BatchReplyResult(tweet_id=item.tweet_id, success=False, error=error_str))
+            state = risk_control.get_state(account_key)
+            if state["write_blocked"]:
+                consecutive_rate_limits = max(consecutive_rate_limits, 2)
 
     return results

@@ -1,13 +1,20 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 import os
 
 
 class Settings(BaseSettings):
-    # Twitter 账号配置 (twikit)
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+
+    # Twitter 账号配置 (twikit/browser)
     twitter_username: str = ""
     twitter_email: str = ""
     twitter_password: str = ""
     twitter_publish_mode: str = "twikit"
+
+    # BrowserEngine 配置
+    browser_headless: bool = True
+    browser_executable_path: str = "/usr/bin/chromium"
+    browser_timeout_ms: int = 90000
 
     # LLM配置
     llm_api_base: str = "https://api.openai.com/v1"
@@ -27,11 +34,6 @@ class Settings(BaseSettings):
     # 上传配置
     upload_dir: str = "./uploads"
     max_upload_size: int = 104857600  # 100MB
-
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-
 
 settings = Settings()
 

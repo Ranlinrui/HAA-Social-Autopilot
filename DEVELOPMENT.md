@@ -11,12 +11,12 @@ Before adding any feature, check here first to avoid duplicating or breaking exi
 
 | Page | Route | File | Status |
 |------|-------|------|--------|
-| Dashboard | `/` | `frontend/src/pages/Dashboard.tsx` | Done |
-| Tweet Management | `/tweets` | `frontend/src/pages/Tweets.tsx` | Done |
+| Tweet Management | `/` -> redirect to `/tweets` | `frontend/src/pages/Tweets.tsx` | Done |
 | Schedule Calendar | `/calendar` | `frontend/src/pages/Calendar.tsx` | Done |
 | Media Library | `/media` | `frontend/src/pages/Media.tsx` | Done |
 | Engage (search & reply) | `/engage` | `frontend/src/pages/Engage.tsx` | Done |
 | Account Monitor | `/monitor` | `frontend/src/pages/Monitor.tsx` | Done |
+| Conversations | `/conversations` | `frontend/src/pages/Conversations.tsx` | Done |
 | Settings | `/settings` | `frontend/src/pages/Settings.tsx` | Done |
 
 All routes are registered in `frontend/src/App.tsx`.
@@ -121,14 +121,16 @@ SQLite file: `backend/data/app.db`
 
 | File | Role |
 |------|------|
-| `services/twitter_api.py` | Unified Twitter facade — all routers call this, never twikit directly |
-| `services/twitter_twikit.py` | twikit 2.3.3 implementation (login, tweet, reply, search, retweet, etc.) |
+| `services/twitter_api.py` | Unified Twitter facade — all routers call this, never engine implementations directly |
+| `services/twitter_twikit.py` | twikit implementation (login, tweet, reply, search, retweet, etc.) |
+| `services/twitter_browser.py` | browser-mode implementation and richer read/write error classification |
+| `services/twitter_risk_control.py` | per-account risk state, cooldown and UI-facing warnings |
+| `services/twitter_auth_backoff.py` | auth retry/backoff helpers shared by login flows |
 | `services/llm_service.py` | OpenAI-compatible LLM content generation |
 | `services/scheduler.py` | APScheduler — runs scheduled tweet publishing and monitor polling |
 | `services/monitor_service.py` | Monitor polling logic — calls `get_user_tweets()` via twikit |
 
-**Do not modify `twitter_twikit.py` without explicit authorization.**
-The engine switch is controlled by `TWITTER_ENGINE` env var in `twitter_api.py`.
+Twitter auth/engine mode is controlled centrally in `twitter_api.py` and exposed through Settings APIs.
 
 ---
 
@@ -192,3 +194,16 @@ docker compose build frontend && docker compose up -d frontend
 docker compose logs backend -f
 docker compose logs frontend -f
 ```
+
+## Verification Commands
+
+```bash
+cd /home/wwwroot/HAA-Social-Autopilot
+make frontend-lint
+make frontend-build
+make backend-compile
+make backend-test-docker
+make check
+```
+
+If the host `python3` is lower than 3.10, treat `make backend-test-docker` as the source of truth for backend test results.

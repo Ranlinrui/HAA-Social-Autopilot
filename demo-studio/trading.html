@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HAA Trading Dashboard</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: hsl(222.2, 84%, 4.9%);
+      --bg2: hsl(222.2, 47.4%, 8%);
+      --card: hsl(222.2, 47.4%, 11.2%);
+      --card2: hsl(222.2, 47.4%, 14%);
+      --border: hsl(217.2, 32.6%, 17.5%);
+      --text: hsl(210, 40%, 98%);
+      --muted: hsl(215, 20.2%, 55%);
+      --primary: hsl(217.2, 91.2%, 59.8%);
+      --success: hsl(142.1, 76.2%, 36.3%);
+      --success-fg: hsl(143, 85%, 60%);
+      --danger: hsl(0, 72.2%, 50.6%);
+      --danger-fg: hsl(0, 85%, 65%);
+      --purple: hsl(263, 70%, 60%);
+      --gold: hsl(45, 95%, 55%);
+    }
+    html, body { height: 100%; background: var(--bg); color: var(--text); font-family: 'Inter', -apple-system, sans-serif; font-size: 14px; overflow: hidden; }
+
+    /* Layout */
+    .dashboard { display: grid; grid-template-columns: 380px 1fr; height: 100vh; gap: 0; }
+
+    /* Left Panel */
+    .left-panel { background: var(--bg2); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
+    .panel-header { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
+    .panel-header .logo { width: 28px; height: 28px; background: linear-gradient(135deg, var(--primary), var(--purple)); border-radius: 6px; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px; }
+    .panel-header h2 { font-size: 15px; font-weight: 600; }
+    .panel-header .status { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--success-fg); }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success-fg); animation: pulse-dot 2s infinite; }
+    @keyframes pulse-dot { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.5;transform:scale(1.3)} }
+
+    /* Account Cards */
+    .account-section { padding: 16px; border-bottom: 1px solid var(--border); }
+    .section-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 10px; }
+    .account-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .acc-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px; cursor: pointer; transition: border-color .2s; }
+    .acc-card:hover { border-color: var(--primary); }
+    .acc-card.editing { border-color: var(--primary); background: var(--card2); }
+    .acc-card .label { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+    .acc-card .value { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .acc-card .value.green { color: var(--success-fg); }
+    .acc-card .value.red { color: var(--danger-fg); }
+    .acc-card .value.blue { color: var(--primary); }
+    .acc-card .value.gold { color: var(--gold); }
+    .acc-card input { width: 100%; background: transparent; border: none; outline: none; color: inherit; font-size: 20px; font-weight: 700; font-family: inherit; }
+
+    /* Big PnL */
+    .pnl-card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin: 0 16px 12px; cursor: pointer; }
+    .pnl-card:hover { border-color: var(--primary); }
+    .pnl-card .label { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+    .pnl-card .big-value { font-size: 32px; font-weight: 800; color: var(--success-fg); line-height: 1; }
+    .pnl-card .big-value.loss { color: var(--danger-fg); }
+    .pnl-card .sub { font-size: 12px; color: var(--muted); margin-top: 4px; }
+    .pnl-card input { background: transparent; border: none; outline: none; color: inherit; font-size: 32px; font-weight: 800; font-family: inherit; width: 100%; }
+
+    /* Positions Table */
+    .positions-section { flex: 1; overflow: hidden; display: flex; flex-direction: column; padding: 0 16px 16px; }
+    .pos-table-wrap { flex: 1; overflow-y: auto; }
+    .pos-table { width: 100%; border-collapse: collapse; }
+    .pos-table th { font-size: 10px; color: var(--muted); text-transform: uppercase; padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--bg2); }
+    .pos-table td { padding: 8px; font-size: 12px; border-bottom: 1px solid hsl(222,47%,13%); }
+    .pos-table tr:hover td { background: var(--card); }
+    .pos-badge { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; }
+    .pos-badge.long { background: hsl(142,76%,15%); color: var(--success-fg); }
+    .pos-badge.short { background: hsl(0,72%,15%); color: var(--danger-fg); }
+    .pos-table td.green { color: var(--success-fg); }
+    .pos-table td.red { color: var(--danger-fg); }
+
+    /* Right Panel */
+    .right-panel { display: flex; flex-direction: column; overflow: hidden; }
+    .right-header { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
+    .right-header h3 { font-size: 15px; font-weight: 600; }
+    .right-header .live-badge { background: hsl(0,72%,20%); color: var(--danger-fg); font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 4px; letter-spacing: .05em; animation: pulse-dot 1.5s infinite; }
+    .right-header .pair-tabs { display: flex; gap: 6px; margin-left: auto; }
+    .pair-tab { padding: 4px 10px; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--muted); transition: all .2s; }
+    .pair-tab.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+
+    /* Order Feed */
+    .order-feed { flex: 1; overflow-y: auto; padding: 8px 0; }
+    .order-item { display: grid; grid-template-columns: 80px 70px 1fr 90px 80px; align-items: center; padding: 8px 20px; border-bottom: 1px solid hsl(222,47%,9%); transition: background .15s; gap: 8px; }
+    .order-item:hover { background: var(--card); }
+    .order-item.new { animation: slide-in .3s ease; }
+    @keyframes slide-in { from{opacity:0;transform:translateY(-8px)} to{opacity:1;transform:translateY(0)} }
+    .order-time { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .order-pair { font-size: 12px; font-weight: 600; }
+    .order-side { display: flex; align-items: center; gap: 4px; }
+    .side-badge { padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
+    .side-badge.buy { background: hsl(142,76%,12%); color: var(--success-fg); }
+    .side-badge.sell { background: hsl(0,72%,12%); color: var(--danger-fg); }
+    .order-price { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; }
+    .order-price.up { color: var(--success-fg); }
+    .order-price.down { color: var(--danger-fg); }
+    .order-qty { font-size: 12px; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+    .order-pnl { font-size: 12px; font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; }
+    .order-pnl.pos { color: var(--success-fg); }
+    .order-pnl.neg { color: var(--danger-fg); }
+
+    /* Feed header */
+    .feed-col-header { display: grid; grid-template-columns: 80px 70px 1fr 90px 80px; padding: 6px 20px; gap: 8px; border-bottom: 1px solid var(--border); }
+    .feed-col-header span { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+    .feed-col-header span:nth-child(4), .feed-col-header span:nth-child(5) { text-align: right; }
+
+    /* Stats bar */
+    .stats-bar { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--border); border-top: 1px solid var(--border); }
+    .stat-item { background: var(--bg2); padding: 10px 16px; }
+    .stat-item .s-label { font-size: 10px; color: var(--muted); margin-bottom: 3px; }
+    .stat-item .s-value { font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .stat-item .s-value.green { color: var(--success-fg); }
+    .stat-item .s-value.blue { color: var(--primary); }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+    /* Director panel */
+    #director { position: fixed; bottom: 0; left: 50%; transform: translateX(-50%) translateY(100%); background: hsl(222,47%,10%); border: 1px solid var(--border); border-bottom: none; border-radius: 10px 10px 0 0; padding: 10px 16px; display: flex; gap: 12px; align-items: center; transition: transform .3s ease; z-index: 100; }
+    #director.open { transform: translateX(-50%) translateY(0); }
+    #director label { font-size: 11px; color: var(--muted); }
+    .dir-btn { padding: 4px 12px; border-radius: 5px; border: 1px solid var(--border); background: var(--card); color: var(--text); font-size: 12px; cursor: pointer; transition: all .15s; }
+    .dir-btn:hover, .dir-btn.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+    .dir-sep { width: 1px; height: 24px; background: var(--border); }
+  </style>
+</head>
+<body>
+<div class="dashboard">
+  <!-- Left Panel -->
+  <div class="left-panel">
+    <div class="panel-header">
+      <div class="logo">H</div>
+      <h2>Hyper Alpha Arena</h2>
+      <div class="status"><div class="status-dot"></div>Bot Active</div>
+    </div>
+
+    <!-- Big PnL -->
+    <div class="pnl-card" id="pnl-card" onclick="editCard(this)">
+      <div class="label">Today's Realized PnL</div>
+      <div class="big-value" id="pnl-display">+$4,827.50</div>
+      <div class="sub" id="pnl-sub">+12.4% &nbsp;|&nbsp; 47 trades closed</div>
+    </div>
+
+    <!-- Account Stats -->
+    <div class="account-section">
+      <div class="section-label">Account Overview</div>
+      <div class="account-grid">
+        <div class="acc-card" onclick="editCard(this)">
+          <div class="label">Total Equity</div>
+          <div class="value blue" id="equity-display">$43,820</div>
+        </div>
+        <div class="acc-card" onclick="editCard(this)">
+          <div class="label">Available</div>
+          <div class="value" id="avail-display">$28,340</div>
+        </div>
+        <div class="acc-card" onclick="editCard(this)">
+          <div class="label">Used Margin</div>
+          <div class="value" id="margin-display">$15,480</div>
+        </div>
+        <div class="acc-card" onclick="editCard(this)">
+          <div class="label">Win Rate</div>
+          <div class="value gold" id="winrate-display">73.2%</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Positions -->
+    <div class="positions-section">
+      <div class="section-label">Open Positions</div>
+      <div class="pos-table-wrap">
+        <table class="pos-table">
+          <thead>
+            <tr>
+              <th>Pair</th>
+              <th>Side</th>
+              <th>Size</th>
+              <th>Entry</th>
+              <th>PnL</th>
+            </tr>
+          </thead>
+          <tbody id="positions-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right Panel -->
+  <div class="right-panel">
+    <div class="right-header">
+      <h3>Live Order Feed</h3>
+      <span class="live-badge">LIVE</span>
+      <div class="pair-tabs">
+        <button class="pair-tab active" onclick="togglePair('BTCUSDT',this)">BTC</button>
+        <button class="pair-tab active" onclick="togglePair('ETHUSDT',this)">ETH</button>
+        <button class="pair-tab active" onclick="togglePair('SOLUSDT',this)">SOL</button>
+        <button class="pair-tab" onclick="togglePair('BNBUSDT',this)">BNB</button>
+        <button class="pair-tab" onclick="togglePair('XRPUSDT',this)">XRP</button>
+      </div>
+    </div>
+    <div class="feed-col-header">
+      <span>Time</span>
+      <span>Pair</span>
+      <span>Side</span>
+      <span>Price</span>
+      <span>PnL</span>
+    </div>
+    <div class="order-feed" id="order-feed"></div>
+    <div class="stats-bar">
+      <div class="stat-item">
+        <div class="s-label">Total Trades</div>
+        <div class="s-value blue" id="s-total">0</div>
+      </div>
+      <div class="stat-item">
+        <div class="s-label">Buy Orders</div>
+        <div class="s-value green" id="s-buy">0</div>
+      </div>
+      <div class="stat-item">
+        <div class="s-label">Sell Orders</div>
+        <div class="s-value" style="color:var(--danger-fg)" id="s-sell">0</div>
+      </div>
+      <div class="stat-item">
+        <div class="s-label">Cumulative PnL</div>
+        <div class="s-value green" id="s-pnl">+$0.00</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Director Panel -->
+<div id="director">
+  <label>Speed</label>
+  <button class="dir-btn" onclick="setFeedSpeed(2000)">Slow</button>
+  <button class="dir-btn active" id="btn-speed-normal" onclick="setFeedSpeed(800)">Normal</button>
+  <button class="dir-btn" onclick="setFeedSpeed(300)">Fast</button>
+  <div class="dir-sep"></div>
+  <label>Feed</label>
+  <button class="dir-btn active" id="btn-feed" onclick="toggleFeed()">Running</button>
+  <div class="dir-sep"></div>
+  <button class="dir-btn" onclick="clearFeed()">Clear</button>
+</div>
+
+<script>
+// State
+const activePairs = new Set(['BTCUSDT','ETHUSDT','SOLUSDT']);
+let feedRunning = true;
+let feedSpeed = 800;
+let stats = { total: 0, buy: 0, sell: 0, pnl: 0 };
+let lastPrices = {};
+let wsConnections = {};
+
+// Positions data
+const positions = [
+  { pair: 'BTC/USDT', side: 'long', size: '0.15', entry: '67,420', pnl: '+$284.50' },
+  { pair: 'ETH/USDT', side: 'long', size: '2.4', entry: '3,521', pnl: '+$96.20' },
+  { pair: 'SOL/USDT', side: 'short', size: '18', entry: '182.4', pnl: '-$34.80' },
+  { pair: 'BNB/USDT', side: 'long', size: '5', entry: '598.2', pnl: '+$47.30' },
+];
+
+function renderPositions() {
+  const tbody = document.getElementById('positions-body');
+  tbody.innerHTML = positions.map(p => `
+    <tr>
+      <td style="font-weight:600">${p.pair}</td>
+      <td><span class="pos-badge ${p.side}">${p.side.toUpperCase()}</span></td>
+      <td>${p.size}</td>
+      <td>$${p.entry}</td>
+      <td class="${p.pnl.startsWith('+') ? 'green' : 'red'}">${p.pnl}</td>
+    </tr>
+  `).join('');
+}
+
+// Binance WebSocket
+const PAIRS = ['BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT','XRPUSDT'];
+const PAIR_LABELS = { BTCUSDT:'BTC/USDT', ETHUSDT:'ETH/USDT', SOLUSDT:'SOL/USDT', BNBUSDT:'BNB/USDT', XRPUSDT:'XRP/USDT' };
+
+function connectWS() {
+  const streams = PAIRS.map(p => p.toLowerCase() + '@aggTrade').join('/');
+  const ws = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams}`);
+  ws.onmessage = (e) => {
+    if (!feedRunning) return;
+    const msg = JSON.parse(e.data);
+    if (!msg.data) return;
+    const d = msg.data;
+    const symbol = d.s;
+    if (!activePairs.has(symbol)) return;
+    const price = parseFloat(d.p);
+    const qty = parseFloat(d.q);
+    const isBuy = !d.m; // m=true means market maker (sell), false means buy
+    addOrder(symbol, price, qty, isBuy);
+  };
+  ws.onclose = () => { setTimeout(connectWS, 3000); };
+  ws.onerror = () => ws.close();
+  return ws;
+}
+
+let pendingOrders = [];
+let lastFlush = 0;
+
+function addOrder(symbol, price, qty, isBuy) {
+  pendingOrders.push({ symbol, price, qty, isBuy, ts: Date.now() });
+}
+
+function flushOrders() {
+  if (!feedRunning || pendingOrders.length === 0) return;
+  const now = Date.now();
+  if (now - lastFlush < feedSpeed) return;
+  lastFlush = now;
+
+  const order = pendingOrders.shift();
+  pendingOrders = []; // drop backlog, keep latest feel
+
+  const { symbol, price, qty, isBuy } = order;
+  const prev = lastPrices[symbol];
+  lastPrices[symbol] = price;
+  const priceDir = prev ? (price >= prev ? 'up' : 'down') : 'up';
+
+  // Simulate PnL
+  const pnlVal = (Math.random() * 80 - 20) * (isBuy ? 1 : 1);
+  const pnlStr = (pnlVal >= 0 ? '+' : '') + '$' + Math.abs(pnlVal).toFixed(2);
+
+  const time = new Date().toLocaleTimeString('en-US', { hour12: false });
+  const feed = document.getElementById('order-feed');
+
+  const item = document.createElement('div');
+  item.className = 'order-item new';
+  item.innerHTML = `
+    <span class="order-time">${time}</span>
+    <span class="order-pair">${PAIR_LABELS[symbol]}</span>
+    <span class="order-side"><span class="side-badge ${isBuy ? 'buy' : 'sell'}">${isBuy ? 'BUY' : 'SELL'}</span></span>
+    <span class="order-price ${priceDir}">${formatPrice(symbol, price)}</span>
+    <span class="order-pnl ${pnlVal >= 0 ? 'pos' : 'neg'}">${pnlStr}</span>
+  `;
+  feed.insertBefore(item, feed.firstChild);
+  while (feed.children.length > 80) feed.removeChild(feed.lastChild);
+
+  // Update stats
+  stats.total++;
+  if (isBuy) stats.buy++; else stats.sell++;
+  stats.pnl += pnlVal;
+  document.getElementById('s-total').textContent = stats.total;
+  document.getElementById('s-buy').textContent = stats.buy;
+  document.getElementById('s-sell').textContent = stats.sell;
+  const pnlEl = document.getElementById('s-pnl');
+  pnlEl.textContent = (stats.pnl >= 0 ? '+' : '') + '$' + Math.abs(stats.pnl).toFixed(2);
+  pnlEl.className = 's-value ' + (stats.pnl >= 0 ? 'green' : '');
+  if (stats.pnl < 0) pnlEl.style.color = 'var(--danger-fg)';
+}
+
+function formatPrice(symbol, price) {
+  if (symbol === 'BTCUSDT') return '$' + price.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  if (symbol === 'ETHUSDT') return '$' + price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return '$' + price.toFixed(3);
+}
+
+// Controls
+function togglePair(pair, btn) {
+  if (activePairs.has(pair)) {
+    if (activePairs.size <= 1) return;
+    activePairs.delete(pair);
+    btn.classList.remove('active');
+  } else {
+    activePairs.add(pair);
+    btn.classList.add('active');
+  }
+}
+
+function toggleFeed() {
+  feedRunning = !feedRunning;
+  const btn = document.getElementById('btn-feed');
+  btn.textContent = feedRunning ? 'Running' : 'Paused';
+  btn.classList.toggle('active', feedRunning);
+}
+
+function setFeedSpeed(ms) {
+  feedSpeed = ms;
+  document.querySelectorAll('#director .dir-btn').forEach(b => {
+    if (['Slow','Normal','Fast'].includes(b.textContent)) b.classList.remove('active');
+  });
+  event.target.classList.add('active');
+}
+
+function clearFeed() {
+  document.getElementById('order-feed').innerHTML = '';
+  stats = { total: 0, buy: 0, sell: 0, pnl: 0 };
+  document.getElementById('s-total').textContent = '0';
+  document.getElementById('s-buy').textContent = '0';
+  document.getElementById('s-sell').textContent = '0';
+  document.getElementById('s-pnl').textContent = '+$0.00';
+}
+
+// Editable cards
+function editCard(card) {
+  const display = card.querySelector('[id$="-display"]') || card.querySelector('.big-value');
+  if (!display) return;
+  const cur = display.textContent;
+  const input = document.createElement('input');
+  input.value = cur;
+  input.style.cssText = display.style.cssText;
+  input.className = display.className;
+  card.classList.add('editing');
+  display.replaceWith(input);
+  input.focus();
+  input.select();
+  const finish = () => {
+    const newVal = input.value || cur;
+    display.textContent = newVal;
+    // Update PnL color
+    if (display.classList.contains('big-value')) {
+      display.classList.toggle('loss', newVal.startsWith('-'));
+    }
+    input.replaceWith(display);
+    card.classList.remove('editing');
+  };
+  input.addEventListener('blur', finish);
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') finish(); });
+}
+
+// Director panel
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;
+  if (e.key.toLowerCase() === 'd') {
+    document.getElementById('director').classList.toggle('open');
+  }
+  if (e.key === ' ') { e.preventDefault(); toggleFeed(); }
+});
+
+// Init
+renderPositions();
+connectWS();
+setInterval(flushOrders, 100);
+</script>
+</body>
+</html>

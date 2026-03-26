@@ -1,6 +1,8 @@
-import { useState, useRef } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { Search, Send, Loader2, ExternalLink, RefreshCw, CheckCircle2, Repeat2, CheckSquare, Square, Layers, ImagePlus, X } from 'lucide-react'
-import api from '@/services/api'
+import api, { formatTwitterActionError, settingsApi } from '@/services/api'
+import { TwitterRiskBanner, getWriteBlockedReason, type TwitterRiskStateLike } from '@/components/TwitterRiskStatus'
+import { TwitterGuardedButton } from '@/components/TwitterGuardedButton'
 
 interface SearchResult {
   id: string
@@ -31,6 +33,12 @@ const PRESET_QUERIES = [
   'automated trading reliable',
 ]
 
+interface TwitterAuthState extends TwitterRiskStateLike {
+  read_only_until?: string
+  auth_backoff_until?: string
+  recovery_until?: string
+}
+
 export default function Engage() {
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<SearchResult[]>([])
@@ -53,8 +61,15 @@ export default function Engage() {
   const [batchSending, setBatchSending] = useState(false)
   const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null)
   const [batchResults, setBatchResults] = useState<Record<string, { success: boolean; error?: string }>>({})
+  const [authState, setAuthState] = useState<TwitterAuthState | null>(null)
+  const writeBlockedReason = getWriteBlockedReason(authState)
+
+  useEffect(() => {
+    settingsApi.getTwitterAuthState().then(setAuthState).catch(() => null)
+  }, [])
 
   async function handleSearch(q?: string) {
+    let hasFailure = false
     const searchQuery = q ?? query
     if (!searchQuery.trim()) return
     setSearching(true)
@@ -64,14 +79,30 @@ export default function Engage() {
     setSelected(new Set())
     setBatchResults({})
     try {
-      const [searchRes, repliedRes] = await Promise.all([
+      const [searchRes, repliedRes] = await Promise.allSettled([
         api.post('/engage/search', { query: searchQuery, count: 20 }),
         api.get('/engage/replied-ids'),
       ])
-      setResults(searchRes.data)
-      setRepliedBefore(new Set(repliedRes.data.ids))
+
+      if (searchRes.status === 'fulfilled') {
+        setResults(searchRes.value.data)
+      } else {
+        hasFailure = true
+      }
+
+      if (repliedRes.status === 'fulfilled') {
+        setRepliedBefore(new Set(repliedRes.value.data.ids))
+      } else {
+        setRepliedBefore(new Set())
+        hasFailure = true
+      }
+
+      if (hasFailure) {
+        const firstError = searchRes.status === 'rejected' ? searchRes.reason : repliedRes.status === 'rejected' ? repliedRes.reason : null
+        setSearchError(formatTwitterActionError(firstError, '部分搜索数据加载失败'))
+      }
     } catch (e: any) {
-      setSearchError(e.response?.data?.detail || '搜索失败，请检查 Twitter 连接')
+      setSearchError(formatTwitterActionError(e, '搜索失败，请检查 Twitter 连接'))
     } finally {
       setSearching(false)
     }
@@ -87,7 +118,7 @@ export default function Engage() {
       })
       setReplyDrafts(prev => ({ ...prev, [tweet.id]: res.data.content }))
     } catch (e: any) {
-      setReplyErrors(prev => ({ ...prev, [tweet.id]: e.response?.data?.detail || '生成失败' }))
+      setReplyErrors(prev => ({ ...prev, [tweet.id]: formatTwitterActionError(e, '生成失败') }))
     } finally {
       setGenerating(prev => ({ ...prev, [tweet.id]: false }))
     }
@@ -108,7 +139,7 @@ export default function Engage() {
       setRepliedBefore(prev => new Set([...prev, tweet.id]))
       setReplyDrafts(prev => ({ ...prev, [tweet.id]: '' }))
     } catch (e: any) {
-      setReplyErrors(prev => ({ ...prev, [tweet.id]: e.response?.data?.detail || '发送失败' }))
+      setReplyErrors(prev => ({ ...prev, [tweet.id]: formatTwitterActionError(e, '发送失败') }))
     } finally {
       setSending(prev => ({ ...prev, [tweet.id]: false }))
     }
@@ -137,7 +168,7 @@ export default function Engage() {
       setReplyDrafts(prev => ({ ...prev, [tweet.id]: '' }))
       setQuoteImages(prev => ({ ...prev, [tweet.id]: [] }))
     } catch (e: any) {
-      setReplyErrors(prev => ({ ...prev, [tweet.id]: e.response?.data?.detail || '引用转发失败' }))
+      setReplyErrors(prev => ({ ...prev, [tweet.id]: formatTwitterActionError(e, '引用转发失败') }))
     } finally {
       setQuoting(prev => ({ ...prev, [tweet.id]: false }))
     }
@@ -197,7 +228,7 @@ export default function Engage() {
     } catch (e: any) {
       // Network-level failure
       targets.forEach(t => {
-        setBatchResults(prev => ({ ...prev, [t.id]: { success: false, error: e.response?.data?.detail || '批量发送失败' } }))
+        setBatchResults(prev => ({ ...prev, [t.id]: { success: false, error: formatTwitterActionError(e, '批量发送失败') } }))
       })
     } finally {
       setBatchSending(false)
@@ -249,6 +280,8 @@ export default function Engage() {
         <div className="p-3 rounded-md bg-destructive/10 text-destructive text-sm">{searchError}</div>
       )}
 
+      <TwitterRiskBanner state={authState} />
+
       {/* Search results */}
       {results.length > 0 && (
         <div className="space-y-4">
@@ -281,14 +314,16 @@ export default function Engage() {
                 {batchGenerating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
                 批量生成草稿
               </button>
-              <button
+              <TwitterGuardedButton
                 onClick={handleBatchSend}
                 disabled={batchSending || selected.size === 0}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50"
-              >
-                {batchSending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
-                批量发送
-              </button>
+                loading={batchSending}
+                icon={<Send className="h-3.5 w-3.5" />}
+                label="批量发送"
+                writeBlocked={!!authState?.write_blocked}
+                writeBlockedReason={writeBlockedReason}
+                className="h-auto gap-1.5 px-3 py-1.5 text-sm"
+              />
               {batchProgress && (
                 <span className="text-sm text-muted-foreground ml-auto">
                   {batchProgress.done} / {batchProgress.total} 已发送
@@ -318,6 +353,8 @@ export default function Engage() {
               onQuote={() => handleQuote(tweet)}
               onToggleSelect={() => toggleSelect(tweet.id)}
               onImagesChange={files => setQuoteImages(prev => ({ ...prev, [tweet.id]: files }))}
+              writeBlocked={!!authState?.write_blocked}
+              writeBlockedReason={writeBlockedReason}
             />
           ))}
         </div>
@@ -345,9 +382,11 @@ interface TweetCardProps {
   onQuote: () => void
   onToggleSelect: () => void
   onImagesChange: (files: File[]) => void
+  writeBlocked: boolean
+  writeBlockedReason: string
 }
 
-function TweetCard({ tweet, draft, generating, sending, quoting, sent, repliedBefore, error, batchMode, isSelected, batchResult, quoteImages, onDraftChange, onGenerate, onSend, onQuote, onToggleSelect, onImagesChange }: TweetCardProps) {
+function TweetCard({ tweet, draft, generating, sending, quoting, sent, repliedBefore, error, batchMode, isSelected, batchResult, quoteImages, onDraftChange, onGenerate, onSend, onQuote, onToggleSelect, onImagesChange, writeBlocked, writeBlockedReason }: TweetCardProps) {
   const charCount = draft.length
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -431,23 +470,28 @@ function TweetCard({ tweet, draft, generating, sending, quoting, sent, repliedBe
               {generating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
               AI 生成
             </button>
-            <button
+            <TwitterGuardedButton
               onClick={onSend}
               disabled={sending || !draft.trim()}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50"
-            >
-              {sending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
-              回复
-            </button>
+              loading={sending}
+              icon={<Send className="h-3.5 w-3.5" />}
+              label="回复"
+              writeBlocked={writeBlocked}
+              writeBlockedReason={writeBlockedReason}
+              className="h-auto gap-1.5 px-3 py-1.5 text-sm"
+            />
             <div className="flex items-center gap-1">
-              <button
+              <TwitterGuardedButton
                 onClick={onQuote}
                 disabled={quoting || !draft.trim()}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-sm border border-primary text-primary rounded-md hover:bg-primary/10 disabled:opacity-50"
-              >
-                {quoting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Repeat2 className="h-3.5 w-3.5" />}
-                引用转发{quoteImages.length > 0 ? ` +${quoteImages.length}图` : ''}
-              </button>
+                loading={quoting}
+                icon={<Repeat2 className="h-3.5 w-3.5" />}
+                label={`引用转发${quoteImages.length > 0 ? ` +${quoteImages.length}图` : ''}`}
+                variant="outline"
+                writeBlocked={writeBlocked}
+                writeBlockedReason={writeBlockedReason}
+                className="h-auto gap-1.5 border-primary px-3 py-1.5 text-sm text-primary hover:bg-primary/10 hover:text-primary"
+              />
               <button
                 onClick={() => fileInputRef.current?.click()}
                 className="flex items-center gap-1 px-2 py-1.5 text-sm border rounded-md hover:bg-accent text-muted-foreground"

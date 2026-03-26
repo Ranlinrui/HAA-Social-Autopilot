@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing import List, Optional
 from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,11 +8,20 @@ from sqlalchemy import select, desc
 from app.database import get_db
 from app.models.conversation import ConversationThread, ConversationSetting
 from app.services.twitter_api import reply_tweet
+from app.services.conversation_service import conversation_service
+from app.services.twitter_risk_control import get_twitter_risk_control
+from app.services.twitter_auth_backoff import seconds_until_backoff_expires
 
 router = APIRouter(prefix="/api/conversation", tags=["conversation"])
 
 
+def _error_detail(exc: Exception) -> str:
+    return str(exc).strip() or exc.__class__.__name__
+
+
 class ThreadOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     root_tweet_id: str
     root_tweet_text: Optional[str]
@@ -33,18 +42,14 @@ class ThreadOut(BaseModel):
     auto_error: Optional[str]
     created_at: Optional[datetime]
 
-    class Config:
-        from_attributes = True
-
 
 class SettingsOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     mode: str
     poll_interval: int
     auto_reply_delay: int
     enabled: bool
-
-    class Config:
-        from_attributes = True
 
 
 class ManualReplyRequest(BaseModel):
@@ -83,13 +88,16 @@ async def list_threads(
     limit: int = 50,
     db: AsyncSession = Depends(get_db)
 ):
-    query = select(ConversationThread).order_by(desc(ConversationThread.created_at)).limit(limit)
-    if status:
-        query = select(ConversationThread).where(
-            ConversationThread.status == status
-        ).order_by(desc(ConversationThread.created_at)).limit(limit)
-    result = await db.execute(query)
-    return result.scalars().all()
+    try:
+        query = select(ConversationThread).order_by(desc(ConversationThread.created_at)).limit(limit)
+        if status:
+            query = select(ConversationThread).where(
+                ConversationThread.status == status
+            ).order_by(desc(ConversationThread.created_at)).limit(limit)
+        result = await db.execute(query)
+        return result.scalars().all()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_error_detail(e))
 
 
 @router.get("/threads/{thread_id}", response_model=ThreadOut)
@@ -123,7 +131,7 @@ async def generate_draft(thread_id: int, db: AsyncSession = Depends(get_db)):
         await db.commit()
         return {"draft": draft}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_error_detail(e))
 
 
 @router.post("/threads/{thread_id}/reply")
@@ -145,7 +153,7 @@ async def manual_reply(
     try:
         reply_id = await reply_tweet(thread.latest_mention_id, body.content)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_error_detail(e))
 
     history = list(thread.history or [])
     history.append({
@@ -198,41 +206,58 @@ async def update_thread_mode(
 
 @router.get("/settings", response_model=SettingsOut)
 async def get_settings(db: AsyncSession = Depends(get_db)):
-    return await _get_or_create_settings(db)
+    try:
+        return await _get_or_create_settings(db)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_error_detail(e))
 
 
 @router.patch("/settings")
 async def update_settings(body: UpdateSettingsRequest, db: AsyncSession = Depends(get_db)):
-    cfg = await _get_or_create_settings(db)
-    if body.mode is not None:
-        if body.mode not in ("auto", "manual"):
-            raise HTTPException(status_code=400, detail="mode must be 'auto' or 'manual'")
-        cfg.mode = body.mode
-    if body.poll_interval is not None:
-        cfg.poll_interval = max(60, body.poll_interval)
-    if body.auto_reply_delay is not None:
-        cfg.auto_reply_delay = max(30, body.auto_reply_delay)
-    if body.enabled is not None:
-        cfg.enabled = body.enabled
-    await db.commit()
-    return {"success": True}
+    try:
+        cfg = await _get_or_create_settings(db)
+        if body.mode is not None:
+            if body.mode not in ("auto", "manual"):
+                raise HTTPException(status_code=400, detail="mode must be 'auto' or 'manual'")
+            cfg.mode = body.mode
+        if body.poll_interval is not None:
+            cfg.poll_interval = max(60, body.poll_interval)
+        if body.auto_reply_delay is not None:
+            cfg.auto_reply_delay = max(30, body.auto_reply_delay)
+        if body.enabled is not None:
+            cfg.enabled = body.enabled
+        await db.commit()
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_error_detail(e))
 
 
 @router.get("/stats")
 async def get_stats(db: AsyncSession = Depends(get_db)):
     from sqlalchemy import func
-    total_result = await db.execute(select(func.count(ConversationThread.id)))
-    total = total_result.scalar() or 0
+    from app.services.twitter_api import get_active_auth_state
 
-    pending_result = await db.execute(
-        select(func.count(ConversationThread.id)).where(ConversationThread.status == "pending")
-    )
-    pending = pending_result.scalar() or 0
+    try:
+        total_result = await db.execute(select(func.count(ConversationThread.id)))
+        total = total_result.scalar() or 0
 
-    cfg = await _get_or_create_settings(db)
-    return {
-        "total_threads": total,
-        "pending_threads": pending,
-        "mode": cfg.mode,
-        "enabled": cfg.enabled,
-    }
+        pending_result = await db.execute(
+            select(func.count(ConversationThread.id)).where(ConversationThread.status == "pending")
+        )
+        pending = pending_result.scalar() or 0
+
+        cfg = await _get_or_create_settings(db)
+        auth_state = await get_active_auth_state("reply")
+        return {
+            "total_threads": int(total or 0),
+            "pending_threads": int(pending or 0),
+            "mode": cfg.mode,
+            "enabled": cfg.enabled,
+            "backoff_seconds": seconds_until_backoff_expires(conversation_service.auth_backoff_until),
+            "backoff_until": conversation_service.auth_backoff_until,
+            **get_twitter_risk_control().get_state(auth_state.get("active_username")),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_error_detail(e))

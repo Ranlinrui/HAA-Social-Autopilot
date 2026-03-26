@@ -10,12 +10,21 @@ import asyncio
 import logging
 import random
 from datetime import datetime, timezone
+
+from app.services.twitter_auth_backoff import (
+    build_auth_backoff_until,
+    build_automation_backoff_until,
+    is_auth_failure,
+    is_automation_failure,
+    is_backoff_active,
+    seconds_until_backoff_expires,
+)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.monitor import MonitoredAccount, MonitorNotification
-from app.services.twitter_api import get_twitter_client, reply_tweet, retweet_tweet
+from app.services.twitter_api import get_user_profile, get_user_timeline, reply_tweet, retweet_tweet
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +141,7 @@ class TwitterMonitorService:
     def __init__(self):
         self.is_running = False
         self.monitor_task = None
+        self.auth_backoff_until = None
 
     async def start(self):
         if self.is_running:
@@ -153,6 +163,11 @@ class TwitterMonitorService:
 
     async def _monitor_loop(self):
         while self.is_running:
+            if is_backoff_active(self.auth_backoff_until):
+                remaining = seconds_until_backoff_expires(self.auth_backoff_until)
+                await asyncio.sleep(min(30, max(5, remaining)))
+                continue
+
             try:
                 async for db in get_db():
                     await self._check_all_accounts(db)
@@ -179,6 +194,22 @@ class TwitterMonitorService:
                 account.last_checked_at = datetime.now(timezone.utc)
                 await db.commit()
             except Exception as e:
+                if is_auth_failure(e):
+                    self.auth_backoff_until = build_auth_backoff_until()
+                    logger.warning(
+                        "Twitter auth failed while checking @%s, entering monitor backoff until %s",
+                        account.username,
+                        self.auth_backoff_until.isoformat(),
+                    )
+                    break
+                if is_automation_failure(e):
+                    self.auth_backoff_until = build_automation_backoff_until()
+                    logger.warning(
+                        "Twitter automation risk triggered while checking @%s, entering monitor backoff until %s",
+                        account.username,
+                        self.auth_backoff_until.isoformat(),
+                    )
+                    break
                 logger.error(f"Error checking account @{account.username}: {e}")
             await asyncio.sleep(interval_per_account)
 
@@ -195,26 +226,24 @@ class TwitterMonitorService:
         return elapsed >= intervals.get(account.priority, 180)
 
     async def _check_account(self, db: AsyncSession, account: MonitoredAccount):
-        client = await get_twitter_client()
-
-        if not account.user_id:
-            user = await client.get_user_by_screen_name(account.username)
-            account.user_id = user.id
-            account.display_name = user.name
+        if not account.user_id or not account.display_name:
+            user = await get_user_profile(account.username)
+            account.user_id = user.get("id") or account.username
+            account.display_name = user.get("name") or account.username
             await db.commit()
 
-        tweets = await client.get_user_tweets(account.user_id, 'Tweets', count=5)
+        tweets = await get_user_timeline(account.username, count=5)
         if not tweets:
             return
 
         new_tweets = []
         for tweet in tweets:
-            if account.last_tweet_id and tweet.id == account.last_tweet_id:
+            if account.last_tweet_id and tweet["id"] == account.last_tweet_id:
                 break
             new_tweets.append(tweet)
 
         if tweets:
-            account.last_tweet_id = tweets[0].id
+            account.last_tweet_id = tweets[0]["id"]
 
         for tweet in reversed(new_tweets):
             notif = await self._create_notification(db, account, tweet)
@@ -224,7 +253,7 @@ class TwitterMonitorService:
                     self._auto_engage(notif.id, account.engage_action, delay)
                 )
                 logger.info(
-                    f"Scheduled auto-engage for tweet {tweet.id} from @{account.username} "
+                    f"Scheduled auto-engage for tweet {tweet['id']} from @{account.username} "
                     f"in {delay}s (action={account.engage_action})"
                 )
 
@@ -235,25 +264,27 @@ class TwitterMonitorService:
         self, db: AsyncSession, account: MonitoredAccount, tweet
     ):
         result = await db.execute(
-            select(MonitorNotification).where(MonitorNotification.tweet_id == tweet.id)
+            select(MonitorNotification).where(MonitorNotification.tweet_id == tweet["id"])
         )
         if result.scalar_one_or_none():
             return None
 
+        tweet_created_at = tweet.get("created_at_datetime") or datetime.now(timezone.utc)
+
         notif = MonitorNotification(
             account_id=account.id,
-            tweet_id=tweet.id,
-            tweet_text=tweet.text or getattr(tweet, 'full_text', '') or "",
-            tweet_url=f"https://twitter.com/{account.username}/status/{tweet.id}",
-            author_username=account.username,
-            author_name=account.display_name or account.username,
-            tweet_created_at=tweet.created_at_datetime,
+            tweet_id=tweet["id"],
+            tweet_text=tweet.get("text", ""),
+            tweet_url=tweet.get("url") or f"https://x.com/{account.username}/status/{tweet['id']}",
+            author_username=tweet.get("author_username") or account.username,
+            author_name=tweet.get("author_name") or account.display_name or account.username,
+            tweet_created_at=tweet_created_at,
             auto_engage_status="scheduled" if account.auto_engage else "skipped",
         )
         db.add(notif)
         await db.commit()
         await db.refresh(notif)
-        logger.info(f"Created notification for tweet {tweet.id} from @{account.username}")
+        logger.info(f"Created notification for tweet {tweet['id']} from @{account.username}")
         return notif
 
     async def _auto_engage(self, notification_id: int, action: str, delay: int):
@@ -301,7 +332,15 @@ class TwitterMonitorService:
                 await db.commit()
 
             except Exception as e:
-                logger.error(f"Auto-engage failed for notification {notification_id}: {e}")
+                if is_automation_failure(e):
+                    self.auth_backoff_until = build_automation_backoff_until()
+                    logger.warning(
+                        "Twitter automation risk triggered while auto-engaging notification %s, entering monitor backoff until %s",
+                        notification_id,
+                        self.auth_backoff_until.isoformat(),
+                    )
+                else:
+                    logger.error(f"Auto-engage failed for notification {notification_id}: {e}")
                 try:
                     result = await db.execute(
                         select(MonitorNotification).where(MonitorNotification.id == notification_id)

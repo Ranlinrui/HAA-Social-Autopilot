@@ -681,3 +681,27 @@ async def get_mentions_twikit(count: int = 40) -> List[dict]:
 async def get_tweet_by_id_twikit(tweet_id: str) -> dict:
     twitter = await get_twitter_twikit()
     return await twitter.get_tweet_by_id(tweet_id)
+
+
+async def get_user_profile_twikit(username: str) -> dict:
+    twitter = await get_twitter_twikit()
+    user = await twitter.client.get_user_by_screen_name(username)
+    return {"id": user.id, "username": user.screen_name, "name": user.name}
+
+
+async def get_user_timeline_twikit(username: str, count: int = 5) -> List[dict]:
+    twitter = await get_twitter_twikit()
+    user = await twitter.client.get_user_by_screen_name(username)
+    tweets = await twitter.client.get_user_tweets(user.id, 'Tweets', count=count)
+    items = []
+    for tweet in tweets or []:
+        items.append({
+            "id": tweet.id,
+            "text": tweet.text or getattr(tweet, 'full_text', '') or '',
+            "author_username": user.screen_name,
+            "author_name": user.name,
+            "created_at": str(getattr(tweet, 'created_at', '')),
+            "created_at_datetime": getattr(tweet, 'created_at_datetime', None),
+            "url": f"https://x.com/{user.screen_name}/status/{tweet.id}",
+        })
+    return items

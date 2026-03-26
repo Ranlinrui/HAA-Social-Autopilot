@@ -1,8 +1,9 @@
-import { useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Eye, EyeOff, CheckCircle, XCircle, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { formatTwitterActionError } from '@/services/api'
 
 const API_BASE = '/api'
 
@@ -12,19 +13,73 @@ interface TestResult {
   username?: string
 }
 
-export default function TwitterCookieManager() {
+interface CookieStatus {
+  configured: boolean
+  is_valid?: boolean
+  is_expired?: boolean
+  account_name?: string
+  username?: string
+  message?: string
+  validation_mode?: string
+}
+
+interface TwitterCookieManagerProps {
+  onStatusChange?: (status: CookieStatus | null) => void
+}
+
+function formatFetchErrorMessage(error: unknown, fallback: string) {
+  return formatTwitterActionError(
+    typeof error === 'object' && error !== null && 'response' in error
+      ? error
+      : { message: error instanceof Error ? error.message : String(error || '') },
+    fallback,
+  )
+}
+
+async function requestJson(path: string, init?: RequestInit) {
+  const response = await fetch(`${API_BASE}${path}`, init)
+  const payload = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    throw { response: { status: response.status, data: payload } }
+  }
+  return payload
+}
+
+export default function TwitterCookieManager({ onStatusChange }: TwitterCookieManagerProps) {
   const [authToken, setAuthToken] = useState('')
   const [ct0, setCt0] = useState('')
   const [accountName, setAccountName] = useState('')
   const [showTokens, setShowTokens] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [isTesting, setIsTesting] = useState(false)
+  const [isClearing, setIsClearing] = useState(false)
+  const [statusLoading, setStatusLoading] = useState(false)
   const [testResult, setTestResult] = useState<TestResult | null>(null)
   const [saveMessage, setSaveMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null)
+  const [cookieStatus, setCookieStatus] = useState<CookieStatus | null>(null)
+
+  const loadStatus = useCallback(async () => {
+    setStatusLoading(true)
+    try {
+      const result = await requestJson('/cookies/status')
+      setCookieStatus(result)
+      onStatusChange?.(result)
+    } catch (error) {
+      const fallback = { configured: false, message: formatFetchErrorMessage(error, '无法读取当前 Cookie 状态') }
+      setCookieStatus(fallback)
+      onStatusChange?.(fallback)
+    } finally {
+      setStatusLoading(false)
+    }
+  }, [onStatusChange])
+
+  useEffect(() => {
+    void loadStatus()
+  }, [loadStatus])
 
   const handleTest = async () => {
     if (!authToken || !ct0) {
-      setTestResult({ is_valid: false, message: 'Please provide both auth_token and ct0' })
+      setTestResult({ is_valid: false, message: '请同时提供 auth_token 和 ct0' })
       return
     }
 
@@ -32,7 +87,7 @@ export default function TwitterCookieManager() {
     setTestResult(null)
 
     try {
-      const response = await fetch(`${API_BASE}/cookies/test`, {
+      const result = await requestJson('/cookies/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -41,12 +96,11 @@ export default function TwitterCookieManager() {
           account_name: accountName || 'default'
         })
       })
-
-      const result = await response.json()
       setTestResult(result)
+      await loadStatus()
 
     } catch (error) {
-      setTestResult({ is_valid: false, message: 'Network error. Please try again.' })
+      setTestResult({ is_valid: false, message: formatFetchErrorMessage(error, 'Cookie 测试请求失败，请稍后重试。') })
     } finally {
       setIsTesting(false)
     }
@@ -54,7 +108,7 @@ export default function TwitterCookieManager() {
 
   const handleSave = async () => {
     if (!authToken || !ct0) {
-      setSaveMessage({ type: 'error', text: 'Please provide both auth_token and ct0' })
+      setSaveMessage({ type: 'error', text: '请同时提供 auth_token 和 ct0' })
       return
     }
 
@@ -62,7 +116,7 @@ export default function TwitterCookieManager() {
     setSaveMessage(null)
 
     try {
-      const response = await fetch(`${API_BASE}/cookies/update`, {
+      await requestJson('/cookies/update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -71,18 +125,33 @@ export default function TwitterCookieManager() {
           account_name: accountName || 'default'
         })
       })
-
-      if (response.ok) {
-        setSaveMessage({ type: 'success', text: 'Cookies saved successfully!' })
-      } else {
-        const error = await response.json()
-        setSaveMessage({ type: 'error', text: error.detail || 'Failed to save cookies' })
-      }
+      setSaveMessage({ type: 'success', text: 'Cookies 已保存。' })
+      await loadStatus()
 
     } catch (error) {
-      setSaveMessage({ type: 'error', text: 'Network error. Please try again.' })
+      setSaveMessage({ type: 'error', text: formatFetchErrorMessage(error, '保存 Cookies 请求失败，请稍后重试。') })
     } finally {
       setIsSaving(false)
+    }
+  }
+
+  const handleClear = async () => {
+    setIsClearing(true)
+    setSaveMessage(null)
+    setTestResult(null)
+    try {
+      const result = await requestJson('/cookies/clear', {
+        method: 'DELETE',
+      })
+      setAuthToken('')
+      setCt0('')
+      setAccountName('')
+      setSaveMessage({ type: 'success', text: result.message || 'Cookies 已清空' })
+    } catch (error) {
+      setSaveMessage({ type: 'error', text: formatFetchErrorMessage(error, '清空 Cookies 请求失败，请稍后重试。') })
+    } finally {
+      await loadStatus()
+      setIsClearing(false)
     }
   }
 
@@ -101,6 +170,31 @@ export default function TwitterCookieManager() {
       </CardHeader>
 
       <CardContent className="space-y-4">
+        <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="font-medium text-slate-900">当前 Cookie 状态</div>
+              {statusLoading ? (
+                <div className="text-slate-600 mt-1">读取中...</div>
+              ) : cookieStatus?.configured ? (
+                <div className="text-slate-700 mt-1">
+                  已配置
+                  {cookieStatus.account_name && `，账号标识: @${cookieStatus.account_name}`}
+                  {cookieStatus.is_valid === false && '，当前标记为无效'}
+                  {cookieStatus.is_expired && '，当前已过期'}
+                </div>
+              ) : (
+                <div className="text-slate-600 mt-1">
+                  {cookieStatus?.message || '当前未配置 Cookie'}
+                </div>
+              )}
+            </div>
+            <Button type="button" variant="outline" size="sm" onClick={loadStatus} disabled={statusLoading}>
+              {statusLoading ? <RefreshCw className="h-4 w-4 animate-spin" /> : '刷新状态'}
+            </Button>
+          </div>
+        </div>
+
         {/* Status Messages */}
         {saveMessage && (
           <div className={`p-3 rounded-lg flex items-center gap-2 ${
@@ -212,6 +306,22 @@ export default function TwitterCookieManager() {
               </>
             ) : (
               '测试 Cookies'
+            )}
+          </Button>
+
+          <Button
+            onClick={handleClear}
+            disabled={isClearing}
+            variant="outline"
+            className="flex-1"
+          >
+            {isClearing ? (
+              <>
+                <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                清理中...
+              </>
+            ) : (
+              '清空 Cookies'
             )}
           </Button>
         </div>

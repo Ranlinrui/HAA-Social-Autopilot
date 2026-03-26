@@ -1,4 +1,4 @@
-# Social Autopilot
+# HAA Social Autopilot
 
 **Twitter/X Social Media Automation & Growth Tool**
 
@@ -14,7 +14,8 @@ A lightweight, self-hosted automation platform for organic Twitter/X growth. Sch
 - **Engage** — Search hot tweets by keyword, generate contextual AI replies, batch reply with rate-limit protection; quote-tweet with optional image attachments (up to 4)
 - **Account Monitoring** — Watch target accounts for new tweets, auto-engage with configurable delay
 - **Conversation Follow-up** — Detect replies to your comments, continue threads in auto or manual mode
-- **Cookie-based Auth** — No official API key required; uses twikit for Twitter access
+- **Multi-mode Twitter Auth** — Twikit, cookie, and browser modes behind a unified backend facade
+- **Risk-aware UI Guards** — Account-scoped risk banners and guarded actions for safer retries
 
 ---
 
@@ -22,7 +23,7 @@ A lightweight, self-hosted automation platform for organic Twitter/X growth. Sch
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                      Web Dashboard                          │
+│                       Web App                               │
 │              React + TailwindCSS + shadcn/ui                │
 ├─────────────────────────────────────────────────────────────┤
 │  - Tweet management (create / edit / delete / schedule)     │
@@ -31,7 +32,7 @@ A lightweight, self-hosted automation platform for organic Twitter/X growth. Sch
 │  - Engage (search + reply + batch)                          │
 │  - Monitor (account watching + auto-engage)                 │
 │  - Conversations (follow-up thread management)              │
-│  - Settings (Twitter login / LLM config)                    │
+│  - Settings (Twitter auth mode / login / LLM config)        │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -40,7 +41,7 @@ A lightweight, self-hosted automation platform for organic Twitter/X growth. Sch
 │                FastAPI + SQLite + APScheduler               │
 ├─────────────────────────────────────────────────────────────┤
 │  - RESTful API (tweet CRUD / media / settings)              │
-│  - Twitter engine (twikit 2.3.3, free, no rate limits)      │
+│  - Twitter engine facade (twikit / cookie / browser)        │
 │  - LLM content generation (OpenAI-compatible)               │
 │  - Scheduler (APScheduler for timed publishing)             │
 │  - Conversation service (mention polling + thread tracking) │
@@ -58,7 +59,7 @@ A lightweight, self-hosted automation platform for organic Twitter/X growth. Sch
 | Database | SQLite | Zero-config, single file |
 | ORM | SQLAlchemy | Async support |
 | Scheduler | APScheduler | Cron-style task scheduling |
-| Twitter engine | twikit 2.3.3 | Cookie-based, no API key needed |
+| Twitter engine | twikit + browser fallback | Unified facade, no official API key required |
 | LLM client | openai | OpenAI-compatible interface |
 
 ### Frontend
@@ -77,7 +78,7 @@ A lightweight, self-hosted automation platform for organic Twitter/X growth. Sch
 ## Directory Structure
 
 ```
-Social-Autopilot/
+HAA-Social-Autopilot/
 ├── backend/
 │   ├── app/
 │   │   ├── main.py                 # FastAPI entry point
@@ -115,7 +116,6 @@ Social-Autopilot/
 │   ├── src/
 │   │   ├── components/
 │   │   ├── pages/
-│   │   │   ├── Dashboard.tsx
 │   │   │   ├── Tweets.tsx
 │   │   │   ├── Calendar.tsx
 │   │   │   ├── Media.tsx
@@ -128,6 +128,7 @@ Social-Autopilot/
 │   │   └── types/index.ts
 │   ├── nginx.conf
 │   └── package.json
+├── Makefile
 ├── .env.example
 ├── docker-compose.yml
 ├── Dockerfile
@@ -190,9 +191,30 @@ uvicorn app.main:app --reload --port 8000
 
 # Frontend
 cd frontend
-pnpm install
-pnpm dev
+npm install
+npm run dev
 ```
+
+### Verification
+
+The backend requires **Python 3.10+**. The host `python3` on some machines may be older, so Docker-based verification is the safest baseline.
+
+```bash
+# Frontend checks
+make frontend-lint
+make frontend-build
+
+# Backend syntax check
+make backend-compile
+
+# Backend tests in a clean Python 3.12 container
+make backend-test-docker
+
+# Run all checks
+make check
+```
+
+`make backend-test-docker` is the canonical test path when local Python does not satisfy the project requirement.
 
 ---
 
@@ -225,6 +247,14 @@ Polls Twitter mention notifications to detect when someone replies to your comme
 | Retweets | 20-30 | 10-15 |
 
 Always randomize intervals (30s-5min). Never use fixed delays.
+
+---
+
+## Notes
+
+- The default landing page is now `/tweets`; the old Dashboard page has been removed.
+- Frontend checks are run with `npm`, not `pnpm`.
+- Browser mode is still under active implementation; Twikit mode remains the primary production path.
 
 ---
 

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional, List
 from datetime import datetime
 from app.models.tweet import TweetStatus, TweetType
@@ -24,16 +24,17 @@ class TweetSchedule(BaseModel):
 
 
 class MediaInTweet(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     filename: str
     filepath: str
     media_type: str
 
-    class Config:
-        from_attributes = True
-
 
 class TweetResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     content: str
     tweet_type: TweetType
@@ -46,9 +47,6 @@ class TweetResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     media_items: List[MediaInTweet] = []
-
-    class Config:
-        from_attributes = True
 
 
 class TweetListResponse(BaseModel):

@@ -11,13 +11,17 @@ from pydantic import BaseModel
 from typing import Optional
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from app.database import get_db
 from app.models.setting import Setting
-from app.config import settings as app_settings
 
 router = APIRouter(prefix="/api/cookies", tags=["cookies"])
+
+
+def _error_detail(exc: Exception, fallback: str) -> str:
+    message = str(exc).strip()
+    return message or fallback
 
 
 class CookieInput(BaseModel):
@@ -33,6 +37,7 @@ class CookieResponse(BaseModel):
     is_valid: Optional[bool] = None
     last_validated_at: Optional[str] = None
     expires_at: Optional[str] = None
+    validation_mode: Optional[str] = None
 
 
 class CookieTestResponse(BaseModel):
@@ -50,7 +55,13 @@ def load_cookies() -> Optional[dict]:
     try:
         if os.path.exists(COOKIE_FILE):
             with open(COOKIE_FILE, 'r') as f:
-                return json.load(f)
+                data = json.load(f)
+                if isinstance(data, dict):
+                    if not data.get("username") and data.get("account_name"):
+                        data["username"] = data["account_name"]
+                    if not data.get("validation_mode"):
+                        data["validation_mode"] = "cookie_only"
+                return data
     except Exception as e:
         print(f"Error loading cookies: {e}")
     return None
@@ -65,6 +76,21 @@ def save_cookies(cookie_data: dict):
     except Exception as e:
         print(f"Error saving cookies: {e}")
         raise
+
+
+async def _upsert_setting(db: AsyncSession, key: str, value: str):
+    result = await db.execute(select(Setting).where(Setting.key == key))
+    setting = result.scalar_one_or_none()
+    if setting:
+        setting.value = value
+    else:
+        db.add(Setting(key=key, value=value))
+
+
+async def _sync_cookie_account_settings(db: AsyncSession, account_name: str):
+    normalized = (account_name or "default").strip() or "default"
+    await _upsert_setting(db, "twitter_username", normalized)
+    await db.commit()
 
 
 @router.get("/current", response_model=CookieResponse)
@@ -83,18 +109,22 @@ async def get_current_cookies():
 
 
 @router.post("/update")
-async def update_cookies(cookie: CookieInput):
+async def update_cookies(cookie: CookieInput, db: AsyncSession = Depends(get_db)):
     """Update Twitter cookies"""
     try:
+        account_name = (cookie.account_name or "default").strip() or "default"
         cookie_data = {
             "auth_token": cookie.auth_token,
             "ct0": cookie.ct0,
-            "account_name": cookie.account_name or "default",
-            "updated_at": datetime.utcnow().isoformat(),
-            "expires_at": (datetime.utcnow() + timedelta(days=30)).isoformat()
+            "account_name": account_name,
+            "username": account_name,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "expires_at": (datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
+            "validation_mode": "cookie_only",
         }
 
         save_cookies(cookie_data)
+        await _sync_cookie_account_settings(db, account_name)
 
         # Reset the in-memory twikit client so it reloads the new cookies
         from app.services.twitter_api import reset_twitter_client
@@ -102,40 +132,43 @@ async def update_cookies(cookie: CookieInput):
 
         return {
             "success": True,
-            "message": "Cookies saved successfully",
+            "message": "Cookies 已保存",
             "data": cookie_data
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_error_detail(e, "保存 Cookies 失败"))
 
 
 @router.post("/test", response_model=CookieTestResponse)
-async def test_cookies(cookie: CookieInput):
+async def test_cookies(cookie: CookieInput, db: AsyncSession = Depends(get_db)):
     """Persist cookies and enable cookie-mode auth without live twikit validation."""
     try:
+        account_name = (cookie.account_name or "default").strip() or "default"
         cookie_data = {
             "auth_token": cookie.auth_token,
             "ct0": cookie.ct0,
-            "account_name": cookie.account_name or "default",
-            "updated_at": datetime.utcnow().isoformat(),
-            "expires_at": (datetime.utcnow() + timedelta(days=30)).isoformat(),
+            "account_name": account_name,
+            "username": account_name,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "expires_at": (datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
             "is_valid": True,
-            "last_validated_at": datetime.utcnow().isoformat(),
+            "last_validated_at": datetime.now(timezone.utc).isoformat(),
             "validation_mode": "cookie_only",
         }
 
         save_cookies(cookie_data)
+        await _sync_cookie_account_settings(db, account_name)
         from app.services.twitter_api import reset_twitter_client
         reset_twitter_client()
 
         return CookieTestResponse(
             is_valid=True,
             message="Cookies 已保存并启用 Cookie 模式，跳过 live twikit transaction 验证",
-            username=cookie.account_name or "default",
+            username=account_name,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_error_detail(e, "测试 Cookies 失败"))
 
 
 @router.delete("/clear")
@@ -144,11 +177,13 @@ async def clear_cookies():
     try:
         if os.path.exists(COOKIE_FILE):
             os.remove(COOKIE_FILE)
+        from app.services.twitter_api import reset_twitter_client
+        reset_twitter_client()
 
-        return {"success": True, "message": "Cookies cleared"}
+        return {"success": True, "message": "Cookies 已清空"}
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_error_detail(e, "清空 Cookies 失败"))
 
 
 @router.get("/status")
@@ -171,7 +206,7 @@ async def get_cookie_status():
     if expires_at:
         try:
             expiry_date = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
-            is_expired = datetime.utcnow() > expiry_date
+            is_expired = datetime.now(timezone.utc) > expiry_date
         except:
             pass
 
@@ -180,7 +215,8 @@ async def get_cookie_status():
         "is_valid": is_valid and not is_expired,
         "is_expired": is_expired,
         "account_name": cookie_data.get('account_name'),
-        "username": cookie_data.get('username'),
+        "username": cookie_data.get('username') or cookie_data.get('account_name'),
         "last_validated_at": last_validated,
-        "expires_at": expires_at
+        "expires_at": expires_at,
+        "validation_mode": cookie_data.get('validation_mode') or "cookie_only",
     }
