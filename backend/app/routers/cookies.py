@@ -6,7 +6,7 @@ Provides endpoints for managing Twitter authentication cookies.
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, update
 from pydantic import BaseModel
 from typing import Optional
 import json
@@ -15,6 +15,15 @@ from datetime import datetime, timedelta, timezone
 
 from app.database import get_db
 from app.models.setting import Setting
+from app.models.twitter_account import TwitterAccount
+from app.services.twitter_account_store import (
+    GLOBAL_COOKIE_FILE,
+    get_account_cookie_file,
+    load_cookie_file,
+    normalize_account_key,
+    save_cookie_file,
+    sync_account_cookie_to_global,
+)
 
 router = APIRouter(prefix="/api/cookies", tags=["cookies"])
 
@@ -47,35 +56,17 @@ class CookieTestResponse(BaseModel):
 
 
 # Cookie storage file path
-COOKIE_FILE = "/app/data/twitter_cookies.json"
+COOKIE_FILE = GLOBAL_COOKIE_FILE
 
 
 def load_cookies() -> Optional[dict]:
     """Load cookies from file"""
-    try:
-        if os.path.exists(COOKIE_FILE):
-            with open(COOKIE_FILE, 'r') as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    if not data.get("username") and data.get("account_name"):
-                        data["username"] = data["account_name"]
-                    if not data.get("validation_mode"):
-                        data["validation_mode"] = "cookie_only"
-                return data
-    except Exception as e:
-        print(f"Error loading cookies: {e}")
-    return None
+    return load_cookie_file(COOKIE_FILE)
 
 
 def save_cookies(cookie_data: dict):
     """Save cookies to file"""
-    try:
-        os.makedirs(os.path.dirname(COOKIE_FILE), exist_ok=True)
-        with open(COOKIE_FILE, 'w') as f:
-            json.dump(cookie_data, f, indent=2)
-    except Exception as e:
-        print(f"Error saving cookies: {e}")
-        raise
+    save_cookie_file(COOKIE_FILE, cookie_data)
 
 
 async def _upsert_setting(db: AsyncSession, key: str, value: str):
@@ -91,6 +82,32 @@ async def _sync_cookie_account_settings(db: AsyncSession, account_name: str):
     normalized = (account_name or "default").strip() or "default"
     await _upsert_setting(db, "twitter_username", normalized)
     await db.commit()
+
+
+async def _ensure_cookie_account_record(db: AsyncSession, account_name: str):
+    normalized = normalize_account_key(account_name)
+    await db.execute(update(TwitterAccount).values(is_active=False))
+    result = await db.execute(select(TwitterAccount).where(TwitterAccount.account_key == normalized))
+    account = result.scalar_one_or_none()
+    if account:
+        account.username = normalized
+        account.is_active = True
+        account.last_login_status = "cookie"
+        account.last_login_message = "Cookie 已导入"
+        return account
+
+    account = TwitterAccount(
+        account_key=normalized,
+        username=normalized,
+        email=None,
+        password=None,
+        is_active=True,
+        last_login_status="cookie",
+        last_login_message="Cookie 已导入",
+    )
+    db.add(account)
+    await db.flush()
+    return account
 
 
 @router.get("/current", response_model=CookieResponse)
@@ -113,18 +130,22 @@ async def update_cookies(cookie: CookieInput, db: AsyncSession = Depends(get_db)
     """Update Twitter cookies"""
     try:
         account_name = (cookie.account_name or "default").strip() or "default"
+        normalized_account_key = normalize_account_key(account_name)
         cookie_data = {
             "auth_token": cookie.auth_token,
             "ct0": cookie.ct0,
-            "account_name": account_name,
-            "username": account_name,
+            "account_name": normalized_account_key,
+            "username": normalized_account_key,
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "expires_at": (datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
             "validation_mode": "cookie_only",
         }
 
         save_cookies(cookie_data)
-        await _sync_cookie_account_settings(db, account_name)
+        save_cookie_file(get_account_cookie_file(normalized_account_key), cookie_data)
+        account = await _ensure_cookie_account_record(db, normalized_account_key)
+        await _upsert_setting(db, "active_twitter_account_id", str(account.id))
+        await _sync_cookie_account_settings(db, normalized_account_key)
 
         # Reset the in-memory twikit client so it reloads the new cookies
         from app.services.twitter_api import reset_twitter_client
@@ -145,11 +166,12 @@ async def test_cookies(cookie: CookieInput, db: AsyncSession = Depends(get_db)):
     """Persist cookies and enable cookie-mode auth without live twikit validation."""
     try:
         account_name = (cookie.account_name or "default").strip() or "default"
+        normalized_account_key = normalize_account_key(account_name)
         cookie_data = {
             "auth_token": cookie.auth_token,
             "ct0": cookie.ct0,
-            "account_name": account_name,
-            "username": account_name,
+            "account_name": normalized_account_key,
+            "username": normalized_account_key,
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "expires_at": (datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
             "is_valid": True,
@@ -158,14 +180,17 @@ async def test_cookies(cookie: CookieInput, db: AsyncSession = Depends(get_db)):
         }
 
         save_cookies(cookie_data)
-        await _sync_cookie_account_settings(db, account_name)
+        save_cookie_file(get_account_cookie_file(normalized_account_key), cookie_data)
+        account = await _ensure_cookie_account_record(db, normalized_account_key)
+        await _upsert_setting(db, "active_twitter_account_id", str(account.id))
+        await _sync_cookie_account_settings(db, normalized_account_key)
         from app.services.twitter_api import reset_twitter_client
         reset_twitter_client()
 
         return CookieTestResponse(
             is_valid=True,
             message="Cookies 已保存并启用 Cookie 模式，跳过 live twikit transaction 验证",
-            username=account_name,
+            username=normalized_account_key,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=_error_detail(e, "测试 Cookies 失败"))

@@ -1,6 +1,11 @@
 import unittest
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
+from tempfile import TemporaryDirectory
+from pathlib import Path
+import json
 
 from app.routers import settings as settings_router
 
@@ -47,12 +52,15 @@ class SettingsModeTests(unittest.IsolatedAsyncioTestCase):
     async def test_twitter_login_in_browser_mode_uses_browser_engine(self):
         db = AsyncMock()
         db.add = Mock()
-        db.execute = AsyncMock(side_effect=[
-            FakeResult([SimpleNamespace(key="twitter_publish_mode", value="browser")]),
-            FakeResult([]),
-            FakeResult([]),
-            FakeResult([]),
-        ])
+        execute_calls = iter([FakeResult([SimpleNamespace(key="twitter_publish_mode", value="browser")])])
+
+        async def fake_execute(*args, **kwargs):
+            try:
+                return next(execute_calls)
+            except StopIteration:
+                return FakeResult([])
+
+        db.execute = AsyncMock(side_effect=fake_execute)
 
         request = settings_router.TwitterLoginRequest(
             username="user1",
@@ -67,7 +75,7 @@ class SettingsModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response.success)
         self.assertIn("Browser 模式登录成功", response.message)
         self.assertEqual(response.username, "browser_user")
-        self.assertEqual(db.add.call_count, 3)
+        self.assertGreaterEqual(db.add.call_count, 4)
         db.commit.assert_awaited_once()
         login_mock.assert_awaited_once_with("user1", "user1@example.com", "pass123")
         twikit_cls.assert_not_called()
@@ -119,6 +127,41 @@ class SettingsModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Cookie 模式", response.message)
         test_mock.assert_not_awaited()
 
+    async def test_get_twitter_login_diagnostic_returns_saved_payload(self):
+        payload = {"label": "login_failed", "stage": "challenge", "url": "https://x.com/i/flow/login"}
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "twitter_browser_login_diagnostic.json"
+            path.write_text(json.dumps(payload))
+            with patch.object(settings_router, "LOGIN_DIAGNOSTIC_FILE", str(path)):
+                response = await settings_router.get_twitter_login_diagnostic()
+
+        self.assertTrue(response["success"])
+        self.assertEqual(response["diagnostic"]["stage"], "challenge")
+
+    async def test_list_twitter_accounts_returns_password_saved_flag(self):
+        now = datetime.now(timezone.utc)
+        db = AsyncMock()
+        db.execute.return_value = FakeResult([
+            SimpleNamespace(
+                id=1,
+                account_key="matrix-a",
+                username="matrix_a",
+                email="a@example.com",
+                is_active=True,
+                password="secret",
+                last_login_status="success",
+                last_login_message="ok",
+                created_at=now,
+                updated_at=now,
+            )
+        ])
+
+        response = await settings_router.list_twitter_accounts(db)
+
+        self.assertEqual(len(response), 1)
+        self.assertTrue(response[0].password_saved)
+        self.assertEqual(response[0].username, "matrix_a")
+
     async def test_get_twitter_auth_state_returns_service_payload(self):
         payload = {
             "feature": "default",
@@ -138,6 +181,44 @@ class SettingsModeTests(unittest.IsolatedAsyncioTestCase):
             response.model_dump(exclude_none=True, exclude_defaults=True),
             payload,
         )
+
+    async def test_check_twitter_account_health_returns_live_probe_summary(self):
+        now = datetime.now(timezone.utc)
+        account = SimpleNamespace(
+            id=1,
+            account_key="matrix-a",
+            username="matrix_a",
+            email="a@example.com",
+            is_active=True,
+            password="secret",
+            last_login_status="cookie",
+            last_login_message="Cookie 已导入",
+            created_at=now,
+            updated_at=now,
+        )
+        db = AsyncMock()
+        db.execute.return_value = FakeResult([account])
+
+        browser = SimpleNamespace(get_session_status=lambda account_key: {"ready": True})
+        twikit_instance = AsyncMock()
+        twikit_instance.get_me.return_value = {"username": "matrix_a"}
+
+        @asynccontextmanager
+        async def fake_using_account(_account_key):
+            yield
+
+        with patch.object(settings_router, "load_cookie_file", return_value={"auth_token": "a", "ct0": "b"}), \
+             patch.object(settings_router, "using_twitter_account", fake_using_account), \
+             patch("app.services.twitter_browser.get_twitter_browser", AsyncMock(return_value=browser)), \
+             patch("app.services.twitter_twikit.TwitterTwikit", return_value=twikit_instance):
+            response = await settings_router.check_twitter_account_health(1, db)
+
+        self.assertTrue(response.success)
+        self.assertTrue(response.cookie_ready)
+        self.assertTrue(response.browser_session_ready)
+        self.assertTrue(response.twikit_ok)
+        self.assertTrue(response.automation_ready)
+        self.assertIn("@matrix_a", response.twikit_message)
 
 
 if __name__ == "__main__":

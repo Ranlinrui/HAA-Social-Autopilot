@@ -23,10 +23,16 @@ from playwright.async_api import (
 from app.config import settings
 from app.logger import setup_logger
 from app.models.tweet import Tweet
+from app.services.twitter_account_store import (
+    get_account_browser_storage_file,
+    get_account_cookie_file,
+    get_effective_account_key,
+)
 
 logger = setup_logger("twitter_browser")
 
 COOKIE_FILE = "/app/data/twitter_cookies.json"
+LOGIN_DIAGNOSTIC_FILE = "/app/data/twitter_browser_login_diagnostic.json"
 HOME_URL = "https://x.com/home"
 LOGIN_URL = "https://x.com/i/flow/login"
 COMPOSE_URL = "https://x.com/compose/post"
@@ -34,6 +40,9 @@ TWEET_URL_RE = re.compile(r"/([^/]+)/status/(\d+)")
 CURRENT_USER_SELECTORS = [
     "a[data-testid='AppTabBar_Profile_Link']",
     "a[aria-label*='Profile']",
+    "button[data-testid='SideNav_AccountSwitcher_Button'] a[href^='/']",
+    "div[data-testid='SideNav_AccountSwitcher_Button'] a[href^='/']",
+    "a[data-testid='AppTabBar_More_Menu'] ~ div a[href^='/']",
 ]
 
 
@@ -140,6 +149,82 @@ def _parse_created_at(value: str | None) -> datetime | None:
         return None
 
 
+def _select_login_challenge_value(page_text: str, username: str, email: str) -> str:
+    lowered = (page_text or "").lower()
+    normalized_username = (username or "").strip()
+    normalized_email = (email or "").strip()
+
+    if "phone number or username" in lowered or "username or phone number" in lowered:
+        return normalized_username or normalized_email
+    if "email" in lowered:
+        return normalized_email or normalized_username
+    if "username" in lowered:
+        return normalized_username or normalized_email
+    return normalized_email or normalized_username
+
+
+def _detect_login_prompt_kind(page_text: str) -> str:
+    lowered = (page_text or "").lower()
+
+    if (
+        "phone, email, or username" in lowered
+        or "sign in to x" in lowered
+        or "sign in to twitter" in lowered
+    ):
+        return "identifier"
+
+    if (
+        "phone number or username" in lowered
+        or "username or phone number" in lowered
+        or "confirm your email" in lowered
+        or "enter your email" in lowered
+        or "enter your phone number" in lowered
+        or "enter your username" in lowered
+        or "check your email" in lowered
+        or "check your phone" in lowered
+        or "we found more than one account" in lowered
+    ):
+        return "challenge"
+
+    if "enter your password" in lowered or "password" in lowered:
+        return "password"
+
+    return "unknown"
+
+
+def _build_button_text_patterns(button_text: str) -> list[re.Pattern[str]]:
+    normalized = (button_text or "").strip().lower()
+    variants: list[str] = [normalized]
+
+    if normalized == "next":
+        variants.extend(["verify", "continue"])
+    elif normalized == "log in":
+        variants.extend(["sign in", "next"])
+
+    seen: set[str] = set()
+    patterns: list[re.Pattern[str]] = []
+    for item in variants:
+        candidate = item.strip()
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        patterns.append(re.compile(rf"^\s*{re.escape(candidate)}\s*$", re.I))
+    return patterns
+
+
+def _mask_login_value(value: str | None) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    if "@" in raw:
+        local, _, domain = raw.partition("@")
+        masked_local = local[:2] + "*" * max(len(local) - 2, 0)
+        return f"{masked_local}@{domain}"
+    if len(raw) <= 4:
+        return "*" * len(raw)
+    return raw[:2] + "*" * (len(raw) - 4) + raw[-2:]
+
+
 class TwitterBrowser:
     def __init__(self):
         self.playwright: Playwright | None = None
@@ -149,7 +234,46 @@ class TwitterBrowser:
         self._mention_detail_semaphore = asyncio.Semaphore(2)
         self._in_reply_to_cache: dict[str, tuple[str | None, float]] = {}
         self.cookies_file = COOKIE_FILE
+        self.storage_state_file = get_account_browser_storage_file("default")
+        self.login_diagnostic_file = LOGIN_DIAGNOSTIC_FILE
         self._browser_major_version = "146"
+        self._current_account_key = "default"
+        self._current_headless = settings.browser_headless
+        self._manual_login_page: Page | None = None
+        self._manual_login_account_key: str | None = None
+        self._manual_login_email: str | None = None
+
+    async def _handle_route(self, route):
+        request = route.request
+        resource_type = request.resource_type
+        url = request.url.lower()
+
+        blocked_domains = (
+            "analytics.twitter.com",
+            "static.ads-twitter.com",
+            "google-analytics.com",
+            "doubleclick.net",
+        )
+        if any(domain in url for domain in blocked_domains):
+            await route.abort()
+            return
+
+        if settings.browser_low_traffic_mode:
+            if settings.browser_block_images and resource_type == "image":
+                await route.abort()
+                return
+            if settings.browser_block_media and resource_type == "media":
+                await route.abort()
+                return
+            if settings.browser_block_fonts and resource_type == "font":
+                await route.abort()
+                return
+
+        await route.continue_()
+
+    def _is_manual_login_active(self) -> bool:
+        page = self._manual_login_page
+        return bool(page is not None and not page.is_closed())
 
     async def close(self):
         self._in_reply_to_cache.clear()
@@ -162,6 +286,11 @@ class TwitterBrowser:
         if self.playwright is not None:
             await self.playwright.stop()
             self.playwright = None
+        self._current_account_key = "default"
+        self._current_headless = settings.browser_headless
+        self._manual_login_page = None
+        self._manual_login_account_key = None
+        self._manual_login_email = None
 
     def _cookie_entries_from_file(self) -> list[dict[str, Any]]:
         if not os.path.exists(self.cookies_file):
@@ -218,6 +347,75 @@ class TwitterBrowser:
                 compact = re.sub(r"\s+", " ", text)
                 return compact[:limit]
         return ""
+
+    async def _log_login_snapshot(self, page: Page, label: str):
+        with suppress(Exception):
+            stage = await self._detect_login_stage(page)
+            excerpt = await self._get_visible_body_excerpt(page, limit=220)
+            logger.info(
+                "Browser 登录阶段=%s, label=%s, url=%s, excerpt=%s",
+                stage,
+                label,
+                page.url,
+                excerpt or "<empty>",
+            )
+
+    async def _write_login_diagnostic(
+        self,
+        page: Page | None,
+        *,
+        label: str,
+        username: str,
+        email: str,
+        error: str | None = None,
+    ):
+        stage = "unknown"
+        url = ""
+        excerpt = ""
+        if page is not None:
+            with suppress(Exception):
+                stage = await self._detect_login_stage(page)
+            with suppress(Exception):
+                url = page.url
+            with suppress(Exception):
+                excerpt = await self._get_visible_body_excerpt(page, limit=400)
+        payload = {
+            "label": label,
+            "stage": stage,
+            "url": url,
+            "excerpt": excerpt,
+            "username": _mask_login_value(username),
+            "email": _mask_login_value(email),
+            "error": (error or "").strip(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            os.makedirs(os.path.dirname(self.login_diagnostic_file), exist_ok=True)
+            Path(self.login_diagnostic_file).write_text(json.dumps(payload, indent=2))
+            logger.info("Browser 登录诊断已写入: %s", self.login_diagnostic_file)
+        except Exception as diag_exc:
+            logger.warning("写入 Browser 登录诊断失败: %s", diag_exc)
+
+    async def _recycle_context(self, reason: str, *, preserve_manual_login: bool = False):
+        logger.info("回收 Browser 上下文: reason=%s", reason)
+        if self.context is not None:
+            with suppress(Exception):
+                await self.context.close()
+            self.context = None
+        if self.browser is not None:
+            with suppress(Exception):
+                await self.browser.close()
+            self.browser = None
+        if self.playwright is not None:
+            with suppress(Exception):
+                await self.playwright.stop()
+        self.playwright = None
+        self._current_account_key = "default"
+        self._current_headless = settings.browser_headless
+        if not preserve_manual_login:
+            self._manual_login_page = None
+            self._manual_login_account_key = None
+            self._manual_login_email = None
 
     async def _has_error_page(self, page: Page) -> bool:
         error_container = page.locator(".errorContainer").first
@@ -304,11 +502,44 @@ class TwitterBrowser:
             return "X 当前拒绝此次登录请求：Could not log you in now. Please try again later."
         if "enter your phone number or username" in body_text:
             return "X 要求额外账号验证：请输入 phone number 或 username。"
+        if "enter your username" in body_text:
+            return "X 要求额外账号验证：请输入 username。"
+        if "check your email" in body_text:
+            return "X 要求额外账号验证：请先确认邮箱验证码或邮箱确认流程。"
+        if "check your phone" in body_text:
+            return "X 要求额外账号验证：请先确认手机验证码或手机确认流程。"
         if "we found more than one account" in body_text:
             return "X 要求进一步确认账号身份：检测到多个候选账号。"
         if "suspicious login prevented" in body_text:
             return "X 阻止了本次可疑登录，请先在网页端人工完成验证。"
         return None
+
+    async def _detect_login_stage(self, page: Page) -> str:
+        password_locator = page.locator("input[name='password']").first
+        with suppress(Exception):
+            if await password_locator.count():
+                await password_locator.wait_for(state="attached", timeout=500)
+                return "password"
+
+        username_locator = page.locator("input[autocomplete='username'], input[name='text']").first
+        body_text = await self._get_visible_body_text(page)
+        with suppress(Exception):
+            if await username_locator.count():
+                prompt_kind = _detect_login_prompt_kind(body_text)
+                if prompt_kind in {"identifier", "challenge"}:
+                    return prompt_kind
+                return "text_input"
+
+        if await self._is_logged_in(page):
+            return "logged_in"
+
+        if await self._extract_login_error(page):
+            return "error"
+
+        prompt_kind = _detect_login_prompt_kind(body_text)
+        if prompt_kind != "unknown":
+            return prompt_kind
+        return "unknown"
 
     async def _extract_onboarding_response_error(self, response: Response) -> str | None:
         if response.status < 400:
@@ -331,15 +562,41 @@ class TwitterBrowser:
             return f"X 登录接口返回错误：HTTP {response.status} {text[:300]}"
         return f"X 登录接口返回错误：HTTP {response.status}"
 
-    async def _ensure_context(self):
+    async def _ensure_context(self, *, headless: bool | None = None):
+        manual_login_active = self._is_manual_login_active() or bool(self._manual_login_account_key)
+        active_account_key = await get_effective_account_key()
+        normalized_account_key = (
+            self._manual_login_account_key
+            if manual_login_active and self._manual_login_account_key
+            else active_account_key or "default"
+        )
+        target_cookie_file = get_account_cookie_file(normalized_account_key)
+        target_storage_state_file = get_account_browser_storage_file(normalized_account_key)
+        if manual_login_active:
+            target_headless = False
+        else:
+            target_headless = settings.browser_headless if headless is None else headless
+
         if self.context is not None:
-            return
+            if (
+                self._current_account_key == normalized_account_key
+                and self.cookies_file == target_cookie_file
+                and self.storage_state_file == target_storage_state_file
+                and self._current_headless == target_headless
+            ):
+                return
+            await self._recycle_context("account_switched", preserve_manual_login=manual_login_active)
+
+        self._current_account_key = normalized_account_key
+        self.cookies_file = target_cookie_file
+        self.storage_state_file = target_storage_state_file
+        self._current_headless = target_headless
 
         executable_path = settings.browser_executable_path if os.path.exists(settings.browser_executable_path) else None
         logger.info("启动 BrowserEngine，browser=%s, proxy=%s", executable_path or "bundled", settings.proxy_url or "无")
         self.playwright = await async_playwright().start()
         launch_kwargs: dict[str, Any] = {
-            "headless": settings.browser_headless,
+            "headless": target_headless,
             "args": [
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
@@ -361,23 +618,47 @@ class TwitterBrowser:
         if isinstance(version, str) and version:
             self._browser_major_version = version.split(".", 1)[0] or self._browser_major_version
         major = self._browser_major_version
-        self.context = await self.browser.new_context(
-            viewport={"width": 1440, "height": 1024},
-            locale="en-US",
-            user_agent=self._build_user_agent(),
-            extra_http_headers={
+        context_kwargs: dict[str, Any] = {
+            "viewport": {"width": 1440, "height": 1024},
+            "locale": "en-US",
+            "user_agent": self._build_user_agent(),
+            "extra_http_headers": {
                 "sec-ch-ua": f'"Chromium";v="{major}", "Google Chrome";v="{major}", "Not=A?Brand";v="24"',
                 "sec-ch-ua-mobile": "?0",
                 "sec-ch-ua-platform": '"Linux"',
             },
+        }
+        if os.path.exists(self.storage_state_file):
+            context_kwargs["storage_state"] = self.storage_state_file
+        self.context = await self.browser.new_context(**context_kwargs)
+        await self.context.route("**/*", self._handle_route)
+        await self.context.add_init_script(
+            """
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+            Object.defineProperty(navigator, 'platform', { get: () => 'Linux x86_64' });
+            Object.defineProperty(navigator, 'plugins', {
+              get: () => [{ name: 'Chrome PDF Plugin' }, { name: 'Chrome PDF Viewer' }, { name: 'Native Client' }]
+            });
+            window.chrome = window.chrome || { runtime: {} };
+            Object.defineProperty(Notification, 'permission', { get: () => 'default' });
+            """
         )
         cookies = self._cookie_entries_from_file()
         if cookies:
             await self.context.add_cookies(cookies)
 
+    async def _save_storage_state(self):
+        if self.context is None:
+            return
+        os.makedirs(os.path.dirname(self.storage_state_file), exist_ok=True)
+        await self.context.storage_state(path=self.storage_state_file)
+
     @asynccontextmanager
-    async def _page_session(self):
-        await self._ensure_context()
+    async def _page_session(self, *, headless: bool | None = None):
+        if self._is_manual_login_active():
+            raise RuntimeError("当前正在人工接管登录，普通 Browser 操作已暂停，请先完成或关闭人工接管")
+        await self._ensure_context(headless=headless)
         assert self.context is not None
         page = await self.context.new_page()
         page.set_default_timeout(settings.browser_timeout_ms)
@@ -396,6 +677,19 @@ class TwitterBrowser:
     async def _goto(self, page: Page, url: str, wait_for_networkidle: bool = True):
         await page.goto(url, wait_until="domcontentloaded")
         await self._wait_for_ready(page, wait_for_networkidle=wait_for_networkidle)
+
+    async def _human_pause(self, page: Page, min_ms: int = 250, max_ms: int = 700):
+        upper = max(min_ms, max_ms)
+        await page.wait_for_timeout(upper)
+
+    async def _human_pre_click(self, page: Page, locator: Locator):
+        with suppress(Exception):
+            box = await locator.bounding_box()
+            if box:
+                target_x = box["x"] + min(max(box["width"] * 0.45, 8), max(box["width"] - 8, 8))
+                target_y = box["y"] + min(max(box["height"] * 0.5, 8), max(box["height"] - 8, 8))
+                await page.mouse.move(target_x, target_y, steps=12)
+        await self._human_pause(page, 180, 420)
 
     async def _extract_current_username(self, page: Page) -> str | None:
         for selector in CURRENT_USER_SELECTORS:
@@ -458,23 +752,34 @@ class TwitterBrowser:
         }
         os.makedirs(os.path.dirname(self.cookies_file), exist_ok=True)
         Path(self.cookies_file).write_text(json.dumps(payload, indent=2))
+        await self._save_storage_state()
 
-    async def _maybe_fill_login_step(self, page: Page, selector: str, value: str | None, button_text: str):
+    async def _maybe_fill_login_step(self, page: Page, selector: str, value: str | None, button_text: str) -> bool:
         if not value:
-            return
+            return False
+        previous_stage = await self._detect_login_stage(page)
+        previous_excerpt = await self._get_visible_body_excerpt(page, limit=220)
+        logger.info(
+            "Browser 登录提交步骤: stage=%s, selector=%s, button=%s, value=%s",
+            previous_stage,
+            selector,
+            button_text,
+            _mask_login_value(value),
+        )
         locator = page.locator(selector).first
         if await locator.count() == 0:
-            return
+            return False
         try:
             await locator.wait_for(state="visible", timeout=4_000)
         except PlaywrightTimeoutError:
-            return
+            return False
         await locator.click()
+        await self._human_pause(page, 120, 260)
         with suppress(Exception):
             await locator.press("Control+A")
             await locator.press("Backspace")
         await locator.fill("")
-        await locator.press_sequentially(value, delay=35)
+        await locator.press_sequentially(value, delay=55)
         with suppress(Exception):
             current_value = await locator.input_value()
             if (current_value or "").strip() != value.strip():
@@ -488,9 +793,13 @@ class TwitterBrowser:
                     value,
                 )
 
-        button = page.locator("button:visible, div[role='button']:visible").filter(
-            has_text=re.compile(button_text, re.I)
-        ).first
+        button_candidates: list[Locator] = []
+        for button_pattern in _build_button_text_patterns(button_text):
+            button_candidates.extend([
+                page.get_by_role("button", name=button_pattern).first,
+                page.locator("button:visible").filter(has_text=button_pattern).first,
+                page.locator("div[role='button']:visible").filter(has_text=button_pattern).first,
+            ])
         response = None
         try:
             async with page.expect_response(
@@ -501,11 +810,21 @@ class TwitterBrowser:
                 ),
                 timeout=10_000,
             ) as response_info:
-                if await button.count():
+                clicked = False
+                for button in button_candidates:
                     with suppress(Exception):
-                        await button.click()
+                        if await button.count():
+                            await self._human_pre_click(page, button)
+                            await button.click()
+                            clicked = True
+                            break
                 with suppress(Exception):
+                    await self._human_pause(page, 200, 380)
                     await locator.press("Enter")
+                if not clicked:
+                    with suppress(Exception):
+                        await self._human_pause(page, 200, 380)
+                        await page.keyboard.press("Enter")
             response = await response_info.value
         except PlaywrightTimeoutError:
             response = None
@@ -514,45 +833,281 @@ class TwitterBrowser:
             if error:
                 raise RuntimeError(error)
         await self._wait_for_ready(page)
+        deadline = asyncio.get_running_loop().time() + 12
+        while asyncio.get_running_loop().time() < deadline:
+            current_stage = await self._detect_login_stage(page)
+            if current_stage != previous_stage:
+                await self._log_login_snapshot(page, f"{button_text}_advanced")
+                return True
+            current_excerpt = await self._get_visible_body_excerpt(page, limit=220)
+            if current_excerpt and current_excerpt != previous_excerpt:
+                await self._log_login_snapshot(page, f"{button_text}_content_changed")
+                return True
+            error = await self._extract_login_error(page)
+            if error:
+                raise RuntimeError(error)
+            await page.wait_for_timeout(250)
+        await self._log_login_snapshot(page, f"{button_text}_stalled")
+        return False
 
     async def login(self, username: str, email: str, password: str) -> str:
         async with self._lock:
+            if username:
+                self.cookies_file = get_account_cookie_file(username)
+                self.storage_state_file = get_account_browser_storage_file(username)
             async with self._page_session() as page:
-                await self._goto(page, LOGIN_URL)
-                await self._maybe_fill_login_step(page, "input[autocomplete='username'], input[name='text']", username, "next")
-                login_error = await self._extract_login_error(page)
-                if login_error:
-                    raise RuntimeError(login_error)
-                await self._maybe_fill_login_step(page, "input[data-testid='ocfEnterTextTextInput'], input[name='text']", email, "next")
-                login_error = await self._extract_login_error(page)
-                if login_error:
-                    raise RuntimeError(login_error)
-
-                password_locator = page.locator("input[name='password']").first
                 try:
-                    await password_locator.wait_for(state="visible", timeout=20_000)
-                except PlaywrightTimeoutError as exc:
+                    logger.info(
+                        "Browser 登录开始: username=%s, email=%s, proxy=%s",
+                        _mask_login_value(username),
+                        _mask_login_value(email),
+                        settings.proxy_url or "无",
+                    )
+                    await self._goto(page, LOGIN_URL)
+                    await self._human_pause(page, 500, 900)
+                    await self._log_login_snapshot(page, "after_goto_login")
+                    primary_identifier = (username or "").strip() or (email or "").strip()
+                    identifier_advanced = await self._maybe_fill_login_step(
+                        page,
+                        "input[autocomplete='username'], input[name='text']",
+                        primary_identifier,
+                        "next",
+                    )
+                    await self._log_login_snapshot(page, "after_identifier_step")
                     login_error = await self._extract_login_error(page)
                     if login_error:
-                        raise RuntimeError(login_error) from exc
-                    page_excerpt = await self._get_visible_body_excerpt(page, limit=400)
-                    if page_excerpt:
-                        raise RuntimeError(
-                            f"Browser 登录未进入密码输入步骤。当前页面内容: {page_excerpt}。这通常表示 X 额外要求账号确认、页面结构变化，或当前代理/IP 环境触发了拦截。"
-                        ) from exc
-                    raise RuntimeError("Browser 登录未进入密码输入步骤，请检查账号校验流程、代理/IP 环境，或直接改用 Cookie 登录") from exc
-                await password_locator.fill(password)
-                login_button = page.get_by_role("button", name=re.compile("log in", re.I)).first
-                await login_button.click()
-                await page.wait_for_url(re.compile(r"x\.com/(home|i/.*|[^/]+$)"), timeout=settings.browser_timeout_ms)
-                await self._wait_for_ready(page)
+                        raise RuntimeError(login_error)
+                    if not identifier_advanced:
+                        login_stage = await self._detect_login_stage(page)
+                        if login_stage in {"identifier", "text_input"}:
+                            page_excerpt = await self._get_visible_body_excerpt(page, limit=400)
+                            if page_excerpt:
+                                raise RuntimeError(
+                                    f"Browser 登录第一步提交后页面未继续。当前页面内容: {page_excerpt}"
+                                )
+                            raise RuntimeError("Browser 登录第一步提交后页面未继续，请检查代理/IP 环境或 X 登录页结构变化。")
+                    challenge_text = await self._get_visible_body_excerpt(page, limit=500)
+                    challenge_value = _select_login_challenge_value(challenge_text, username, email)
+                    challenge_advanced = await self._maybe_fill_login_step(
+                        page,
+                        "input[data-testid='ocfEnterTextTextInput'], input[name='text']",
+                        challenge_value,
+                        "next",
+                    )
+                    if not challenge_advanced:
+                        alternate_value = ""
+                        normalized_username = (username or "").strip()
+                        normalized_email = (email or "").strip()
+                        if challenge_value == normalized_email:
+                            alternate_value = normalized_username
+                        elif challenge_value == normalized_username:
+                            alternate_value = normalized_email
+                        if alternate_value and alternate_value != challenge_value:
+                            challenge_advanced = await self._maybe_fill_login_step(
+                                page,
+                                "input[data-testid='ocfEnterTextTextInput'], input[name='text']",
+                                alternate_value,
+                                "next",
+                            )
+                    await self._log_login_snapshot(page, "after_challenge_step")
+                    login_error = await self._extract_login_error(page)
+                    if login_error:
+                        raise RuntimeError(login_error)
+                    if not challenge_advanced:
+                        login_stage = await self._detect_login_stage(page)
+                        if login_stage in {"challenge", "text_input"}:
+                            page_excerpt = await self._get_visible_body_excerpt(page, limit=400)
+                            if page_excerpt:
+                                raise RuntimeError(
+                                    f"Browser 登录账号确认步骤未继续。当前页面内容: {page_excerpt}"
+                                )
+                            raise RuntimeError("Browser 登录账号确认步骤未继续，请检查 X 额外校验流程或当前代理/IP 环境。")
 
-                if not await self._is_logged_in(page):
-                    raise RuntimeError("Browser 模式登录后仍未进入已登录状态")
+                    password_locator = page.locator("input[name='password']").first
+                    try:
+                        await password_locator.wait_for(state="visible", timeout=20_000)
+                    except PlaywrightTimeoutError as exc:
+                        login_error = await self._extract_login_error(page)
+                        if login_error:
+                            raise RuntimeError(login_error) from exc
+                        page_excerpt = await self._get_visible_body_excerpt(page, limit=400)
+                        if page_excerpt:
+                            raise RuntimeError(
+                                f"Browser 登录未进入密码输入步骤。当前页面内容: {page_excerpt}。这通常表示 X 额外要求账号确认、页面结构变化，或当前代理/IP 环境触发了拦截。"
+                            ) from exc
+                        raise RuntimeError("Browser 登录未进入密码输入步骤，请检查账号校验流程、代理/IP 环境，或直接改用 Cookie 登录") from exc
+                    await self._human_pause(page, 300, 650)
+                    await password_locator.fill(password)
+                    login_button = page.get_by_role("button", name=re.compile("log in", re.I)).first
+                    login_response = None
+                    try:
+                        async with page.expect_response(
+                            lambda resp: "onboarding/task.json" in resp.url and resp.request.method == "POST",
+                            timeout=10_000,
+                        ) as response_info:
+                            await self._human_pre_click(page, login_button)
+                            await login_button.click()
+                        login_response = await response_info.value
+                    except PlaywrightTimeoutError:
+                        await self._human_pre_click(page, login_button)
+                        await login_button.click()
+                    if login_response is not None:
+                        error = await self._extract_onboarding_response_error(login_response)
+                        if error:
+                            raise RuntimeError(error)
+                    try:
+                        await page.wait_for_url(re.compile(r"x\.com/(home|i/.*|[^/]+$)"), timeout=settings.browser_timeout_ms)
+                    except PlaywrightTimeoutError as exc:
+                        await self._log_login_snapshot(page, "after_login_submit_timeout")
+                        login_error = await self._extract_login_error(page)
+                        if login_error:
+                            raise RuntimeError(login_error) from exc
+                        page_excerpt = await self._get_visible_body_excerpt(page, limit=400)
+                        if page_excerpt:
+                            raise RuntimeError(f"Browser 登录后未进入已登录页面。当前页面内容: {page_excerpt}") from exc
+                        raise RuntimeError("Browser 登录后未进入已登录页面，请检查账号风控状态、代理/IP 环境或额外校验流程。") from exc
+                    await self._wait_for_ready(page)
+                    await self._log_login_snapshot(page, "after_login_success_navigation")
 
-                username_now = await self._extract_current_username(page)
-                await self._save_auth_cookies(page, username_now or username)
-                return username_now or username
+                    if not await self._is_logged_in(page):
+                        await self._log_login_snapshot(page, "after_login_not_logged_in")
+                        raise RuntimeError("Browser 模式登录后仍未进入已登录状态")
+
+                    username_now = await self._extract_current_username(page)
+                    logger.info(
+                        "Browser 登录成功: current_username=%s, url=%s",
+                        username_now or "<unknown>",
+                        page.url,
+                    )
+                    await self._save_auth_cookies(page, username_now or username)
+                    return username_now or username
+                except Exception as exc:
+                    await self._write_login_diagnostic(
+                        page,
+                        label="login_failed",
+                        username=username,
+                        email=email,
+                        error=str(exc),
+                    )
+                    lowered = str(exc).lower()
+                    if "could not log you in now" in lowered or "[399]" in lowered:
+                        await self._recycle_context("login_399")
+                    raise
+
+    async def start_manual_login(self, username: str, email: str | None = None) -> dict[str, Any]:
+        async with self._lock:
+            normalized_username = (username or "").strip().lstrip("@")
+            if not normalized_username:
+                raise RuntimeError("启动人工接管登录失败：用户名不能为空")
+
+            self.cookies_file = get_account_cookie_file(normalized_username)
+            self.storage_state_file = get_account_browser_storage_file(normalized_username)
+            self._manual_login_account_key = normalized_username
+            self._manual_login_email = (email or "").strip() or None
+
+            await self._ensure_context(headless=False)
+            assert self.context is not None
+
+            page = self._manual_login_page
+            if page is None or page.is_closed():
+                page = await self.context.new_page()
+                page.set_default_timeout(settings.browser_timeout_ms)
+                self._manual_login_page = page
+
+            await self._goto(page, LOGIN_URL, wait_for_networkidle=False)
+            await self._human_pause(page, 300, 600)
+            with suppress(Exception):
+                await page.bring_to_front()
+            with suppress(Exception):
+                await page.evaluate("window.focus()")
+            return {
+                "ready": os.path.exists(self.storage_state_file),
+                "manual_login_active": True,
+                "username": normalized_username,
+                "account_key": normalized_username,
+            }
+
+    async def complete_manual_login(self) -> dict[str, Any]:
+        async with self._lock:
+            page = self._manual_login_page
+            if page is None or page.is_closed():
+                raise RuntimeError("当前没有可完成的人工接管登录会话，请先启动人工接管浏览器")
+
+            await self._wait_for_ready(page, wait_for_networkidle=False)
+            if not await self._is_logged_in(page):
+                login_error = await self._extract_login_error(page)
+                if login_error:
+                    raise RuntimeError(login_error)
+                page_excerpt = await self._get_visible_body_excerpt(page, limit=260)
+                if page_excerpt:
+                    raise RuntimeError(f"人工接管登录尚未完成。当前页面内容: {page_excerpt}")
+                raise RuntimeError("人工接管登录尚未完成，请先在远程浏览器中完成登录")
+
+            username_now = await self._extract_current_username(page)
+            account_name = username_now or self._manual_login_account_key or "default"
+            await self._save_auth_cookies(page, account_name)
+            with suppress(Exception):
+                await page.close()
+            self._manual_login_page = None
+            self._manual_login_account_key = None
+            self._manual_login_email = None
+            return {
+                "ready": True,
+                "manual_login_active": False,
+                "username": username_now or account_name,
+                "account_key": account_name,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+    async def cancel_manual_login(self):
+        async with self._lock:
+            if self._manual_login_page is not None and not self._manual_login_page.is_closed():
+                with suppress(Exception):
+                    await self._manual_login_page.close()
+            self._manual_login_page = None
+            self._manual_login_account_key = None
+            self._manual_login_email = None
+
+    def get_manual_login_status(self) -> dict[str, Any]:
+        active = self._is_manual_login_active()
+        return {
+            "manual_login_active": active,
+            "username": self._manual_login_account_key,
+            "account_key": self._manual_login_account_key,
+        }
+
+    async def sync_session(self) -> str:
+        async with self._lock:
+            async with self._page_session() as page:
+                await self._goto(page, HOME_URL)
+                username = await self._assert_authenticated_action(
+                    page,
+                    "同步 Browser 会话",
+                    require_account_available=False,
+                    require_username=True,
+                )
+                await self._save_auth_cookies(page, username)
+                return username or "unknown"
+
+    def get_session_status(self, account_key: str | None = None) -> dict[str, Any]:
+        target_file = (
+            get_account_browser_storage_file(account_key)
+            if account_key is not None
+            else self.storage_state_file
+        )
+        exists = os.path.exists(target_file)
+        updated_at = None
+        if exists:
+            with suppress(OSError):
+                updated_at = datetime.fromtimestamp(
+                    os.path.getmtime(target_file),
+                    tz=timezone.utc,
+                ).isoformat()
+        return {
+            "ready": exists,
+            "storage_state_file": target_file,
+            "updated_at": updated_at,
+        }
 
     async def ensure_authenticated_page(self) -> Page:
         async with self._page_session() as page:
@@ -573,6 +1128,49 @@ class TwitterBrowser:
                 )
                 await self._save_auth_cookies(page, username)
                 return username
+
+    async def check_session_health(self) -> dict[str, Any]:
+        checks: list[dict[str, Any]] = []
+
+        async def run_check(name: str, action):
+            try:
+                result = await action()
+                checks.append({
+                    "name": name,
+                    "ok": True,
+                    "detail": result,
+                })
+            except Exception as exc:
+                checks.append({
+                    "name": name,
+                    "ok": False,
+                    "detail": str(exc),
+                })
+
+        await run_check("home", self.test_connection)
+        await run_check("search", lambda: self._check_search_health())
+        await run_check("mentions", lambda: self._check_mentions_health())
+
+        ok = all(item["ok"] for item in checks)
+        return {
+            "ok": ok,
+            "summary": "Browser 会话健康检查通过" if ok else "Browser 会话部分异常，请查看各项检查结果",
+            "checks": checks,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    async def _check_search_health(self) -> str:
+        results = await self.search_tweets(
+            "bitcoin",
+            count=max(1, settings.browser_health_check_search_count),
+        )
+        return f"搜索可用，返回 {len(results)} 条结果"
+
+    async def _check_mentions_health(self) -> str:
+        mentions = await self.get_mentions(
+            count=max(1, settings.browser_health_check_mentions_count),
+        )
+        return f"提及页可用，读取到 {len(mentions)} 条记录"
 
     async def _wait_for_tweet_response(self, page: Page, click_callback):
         async with page.expect_response(lambda resp: "CreateTweet" in resp.url and resp.request.method == "POST", timeout=settings.browser_timeout_ms) as response_info:
@@ -871,7 +1469,10 @@ class TwitterBrowser:
                 await self._assert_no_read_page_error(page, "读取提及")
                 items = await self._collect_tweet_cards(page, count)
                 mentions = []
-                resolution_limit = min(len(items), 5)
+                resolution_limit = min(
+                    len(items),
+                    max(0, settings.browser_mentions_reply_resolution_limit),
+                )
                 resolved_in_reply_to: list[str | None] = [None] * resolution_limit
                 if resolution_limit:
                     results = await asyncio.gather(
@@ -982,6 +1583,45 @@ async def login_browser(username: str, email: str, password: str) -> str:
 async def test_connection_browser() -> str:
     browser = await get_twitter_browser()
     return await browser.test_connection()
+
+
+async def sync_browser_session() -> str:
+    browser = await get_twitter_browser()
+    return await browser.sync_session()
+
+
+async def get_browser_session_status() -> dict[str, Any]:
+    browser = await get_twitter_browser()
+    account_key = await get_effective_account_key()
+    return browser.get_session_status(account_key or "default")
+
+
+async def start_manual_browser_login(username: str, email: str | None = None) -> dict[str, Any]:
+    browser = await get_twitter_browser()
+    return await browser.start_manual_login(username, email)
+
+
+async def complete_manual_browser_login() -> dict[str, Any]:
+    browser = await get_twitter_browser()
+    return await browser.complete_manual_login()
+
+
+async def cancel_manual_browser_login():
+    browser = await get_twitter_browser()
+    await browser.cancel_manual_login()
+
+
+async def get_manual_browser_login_status() -> dict[str, Any]:
+    browser = await get_twitter_browser()
+    status = browser.get_manual_login_status()
+    account_key = status.get("account_key") or await get_effective_account_key()
+    session_status = browser.get_session_status(account_key or "default")
+    return {**session_status, **status}
+
+
+async def check_browser_session_health() -> dict[str, Any]:
+    browser = await get_twitter_browser()
+    return await browser.check_session_health()
 
 
 async def publish_tweet_browser(tweet: Tweet) -> str:

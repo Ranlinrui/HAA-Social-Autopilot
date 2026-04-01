@@ -11,6 +11,7 @@ from app.config import settings
 from app.models.media import MediaType
 from app.models.tweet import Tweet
 from app.logger import setup_logger
+from app.services.twitter_account_store import get_account_cookie_file, get_effective_account_key
 
 try:
     from x_client_transaction import ClientTransaction as CommunityClientTransaction
@@ -124,6 +125,9 @@ class TwitterTwikit:
 
     async def init_client(self):
         logger.info("初始化 twikit 客户端")
+        active_account_key = await get_effective_account_key()
+        if active_account_key:
+            self.cookies_file = get_account_cookie_file(active_account_key)
         self.client = self._create_client()
 
         if os.path.exists(self.cookies_file):
@@ -153,6 +157,8 @@ class TwitterTwikit:
         login_username = username or settings.twitter_username
         login_email = email or settings.twitter_email
         login_password = password or settings.twitter_password
+        if login_username:
+            self.cookies_file = get_account_cookie_file(login_username)
 
         if not login_username or not login_email or not login_password:
             raise ValueError("Twitter 账号信息未配置，请在 .env 文件或前端 Settings 页面配置")

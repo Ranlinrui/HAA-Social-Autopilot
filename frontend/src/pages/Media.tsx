@@ -7,7 +7,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { InlineConfirm } from '@/components/InlineConfirm'
 import { InlineNotice } from '@/components/InlineNotice'
 import { Badge } from '@/components/ui/badge'
-import { mediaApi, formatTwitterActionError } from '@/services/api'
+import { mediaApi, formatTwitterActionError, logClientError } from '@/services/api'
 import { useMediaStore } from '@/stores'
 import { formatFileSize } from '@/lib/utils'
 
@@ -30,7 +30,7 @@ export default function Media() {
       const res = await mediaApi.list()
       setMediaList(res.items, res.total)
     } catch (error) {
-      console.error('Failed to load media:', error)
+      logClientError('Media.loadMedia', error)
       setLoadError(formatTwitterActionError(error, '素材列表加载失败'))
     } finally {
       setLoading(false)
@@ -46,12 +46,10 @@ export default function Media() {
       setUploadError('')
       setUploading(true)
       try {
-        for (const file of acceptedFiles) {
-          const media = await mediaApi.upload(file)
-          addMedia(media)
-        }
+        const uploadedMedia = await Promise.all(acceptedFiles.map((file) => mediaApi.upload(file)))
+        uploadedMedia.forEach((media) => addMedia(media))
       } catch (error) {
-        console.error('Failed to upload file:', error)
+        logClientError('Media.onDrop', error)
         const message = error instanceof AxiosError
           ? formatTwitterActionError({ response: error.response, message: error.message }, '上传失败，请稍后重试')
           : formatTwitterActionError({ message: error instanceof Error ? error.message : String(error || '') }, '上传失败，请稍后重试')
@@ -91,7 +89,7 @@ export default function Media() {
       setPendingDeleteId(null)
       setActionMessage({ tone: 'success', title: '素材已删除', message: '该素材已从素材库移除。' })
     } catch (error) {
-      console.error('Failed to delete media:', error)
+      logClientError('Media.handleDelete', error)
       setActionMessage({ tone: 'error', title: '删除素材失败', message: formatTwitterActionError(error, '删除素材失败') })
     }
   }

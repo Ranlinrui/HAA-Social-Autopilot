@@ -11,6 +11,7 @@ import logging
 import random
 from datetime import datetime, timezone
 
+from app.config import settings
 from app.services.twitter_auth_backoff import (
     build_auth_backoff_until,
     build_automation_backoff_until,
@@ -24,6 +25,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.monitor import MonitoredAccount, MonitorNotification
+from app.services.twitter_account_store import using_twitter_account
+from app.services.twitter_auto_action_guard import get_twitter_auto_action_guard
+from app.services.twitter_engage_strategy import get_twitter_engage_strategy
 from app.services.twitter_api import get_user_profile, get_user_timeline, reply_tweet, retweet_tweet
 
 logger = logging.getLogger(__name__)
@@ -142,6 +146,7 @@ class TwitterMonitorService:
         self.is_running = False
         self.monitor_task = None
         self.auth_backoff_until = None
+        self._active_auto_engage_tasks: set[int] = set()
 
     async def start(self):
         if self.is_running:
@@ -165,7 +170,7 @@ class TwitterMonitorService:
         while self.is_running:
             if is_backoff_active(self.auth_backoff_until):
                 remaining = seconds_until_backoff_expires(self.auth_backoff_until)
-                await asyncio.sleep(min(30, max(5, remaining)))
+                await asyncio.sleep(min(settings.monitor_loop_interval_seconds, max(30, remaining)))
                 continue
 
             try:
@@ -174,9 +179,11 @@ class TwitterMonitorService:
                     break
             except Exception as e:
                 logger.error(f"Error in monitor loop: {e}")
-            await asyncio.sleep(30)
+            await asyncio.sleep(settings.monitor_loop_interval_seconds)
 
     async def _check_all_accounts(self, db: AsyncSession):
+        await self._recover_scheduled_notifications(db)
+
         result = await db.execute(
             select(MonitoredAccount).where(MonitoredAccount.is_active == True)
         )
@@ -184,7 +191,7 @@ class TwitterMonitorService:
         if not accounts:
             return
 
-        interval_per_account = max(5, 30 / len(accounts))
+        interval_per_account = max(15, settings.monitor_loop_interval_seconds / max(len(accounts), 1))
 
         for account in accounts:
             try:
@@ -213,6 +220,64 @@ class TwitterMonitorService:
                 logger.error(f"Error checking account @{account.username}: {e}")
             await asyncio.sleep(interval_per_account)
 
+    def _schedule_auto_engage_task(self, notification_id: int, action: str, delay: int):
+        if notification_id in self._active_auto_engage_tasks:
+            return
+
+        self._active_auto_engage_tasks.add(notification_id)
+        task = asyncio.create_task(self._auto_engage(notification_id, action, delay))
+
+        def _cleanup(_task):
+            self._active_auto_engage_tasks.discard(notification_id)
+
+        task.add_done_callback(_cleanup)
+
+    async def _recover_scheduled_notifications(self, db: AsyncSession):
+        result = await db.execute(
+            select(MonitorNotification, MonitoredAccount)
+            .join(MonitoredAccount, MonitoredAccount.id == MonitorNotification.account_id)
+            .where(
+                MonitorNotification.auto_engage_status == "scheduled",
+                MonitorNotification.is_commented == False,
+                MonitoredAccount.auto_engage == True,
+                MonitoredAccount.is_active == True,
+            )
+            .order_by(MonitorNotification.notified_at.desc())
+            .limit(100)
+        )
+        rows = result.all()
+        if not rows:
+            return
+
+        now = datetime.now(timezone.utc)
+        dirty = False
+        for notif, account in rows:
+            if notif.id in self._active_auto_engage_tasks:
+                continue
+
+            notified_at = notif.notified_at or now
+            if notified_at.tzinfo is None:
+                notified_at = notified_at.replace(tzinfo=timezone.utc)
+            age_seconds = max(0, int((now - notified_at).total_seconds()))
+
+            if age_seconds > 6 * 3600:
+                notif.auto_engage_status = "skipped"
+                notif.auto_engage_error = "自动互动任务在服务重启后已过期，已跳过"
+                dirty = True
+                continue
+
+            remaining = max(0, int(account.engage_delay or 0) - age_seconds)
+            self._schedule_auto_engage_task(notif.id, account.engage_action, remaining)
+            logger.info(
+                "Recovered scheduled auto-engage for notification %s in %ss (action=%s)",
+                notif.id,
+                remaining,
+                account.engage_action,
+            )
+
+        if dirty:
+            await db.commit()
+
     def _should_check_account(self, account: MonitoredAccount) -> bool:
         if not account.last_checked_at:
             return True
@@ -221,18 +286,23 @@ class TwitterMonitorService:
         if last.tzinfo is None:
             last = last.replace(tzinfo=timezone.utc)
         elapsed = (now - last).total_seconds()
-        # Priority intervals: 1=60s, 2=180s, 3=600s
-        intervals = {1: 60, 2: 180, 3: 600}
+        # Priority intervals are deliberately stretched in low-traffic mode.
+        intervals = {
+            1: settings.monitor_priority_high_interval_seconds,
+            2: settings.monitor_priority_medium_interval_seconds,
+            3: settings.monitor_priority_low_interval_seconds,
+        }
         return elapsed >= intervals.get(account.priority, 180)
 
     async def _check_account(self, db: AsyncSession, account: MonitoredAccount):
-        if not account.user_id or not account.display_name:
-            user = await get_user_profile(account.username)
-            account.user_id = user.get("id") or account.username
-            account.display_name = user.get("name") or account.username
-            await db.commit()
+        async with using_twitter_account(account.account_key):
+            if not account.user_id or not account.display_name:
+                user = await get_user_profile(account.username)
+                account.user_id = user.get("id") or account.username
+                account.display_name = user.get("name") or account.username
+                await db.commit()
 
-        tweets = await get_user_timeline(account.username, count=5)
+            tweets = await get_user_timeline(account.username, count=settings.monitor_timeline_fetch_count)
         if not tweets:
             return
 
@@ -249,9 +319,7 @@ class TwitterMonitorService:
             notif = await self._create_notification(db, account, tweet)
             if notif and account.auto_engage:
                 delay = _human_like_delay(account.engage_delay)
-                asyncio.create_task(
-                    self._auto_engage(notif.id, account.engage_action, delay)
-                )
+                self._schedule_auto_engage_task(notif.id, account.engage_action, delay)
                 logger.info(
                     f"Scheduled auto-engage for tweet {tweet['id']} from @{account.username} "
                     f"in {delay}s (action={account.engage_action})"
@@ -272,6 +340,7 @@ class TwitterMonitorService:
         tweet_created_at = tweet.get("created_at_datetime") or datetime.now(timezone.utc)
 
         notif = MonitorNotification(
+            account_key=account.account_key,
             account_id=account.id,
             tweet_id=tweet["id"],
             tweet_text=tweet.get("text", ""),
@@ -302,14 +371,60 @@ class TwitterMonitorService:
                 # Skip if already manually handled
                 if notif.is_commented:
                     notif.auto_engage_status = "skipped"
+                    notif.auto_engage_error = "已被人工处理，自动互动已跳过"
                     await db.commit()
                     return
 
+                guard = get_twitter_auto_action_guard()
+                strategy = get_twitter_engage_strategy()
+                choice = await strategy.choose_account_for_auto_engage()
+                if choice is None:
+                    notif.auto_engage_status = "skipped"
+                    notif.auto_engage_error = "当前没有可用的矩阵账号可执行自动互动"
+                    await db.commit()
+                    return
+                actor_account_key = choice.account_key
+                notif.account_key = actor_account_key
+
                 if action in ("reply", "both"):
-                    content = await _generate_reply_content(
-                        notif.tweet_text, notif.author_username
+                    strategy_skip = strategy.should_skip_auto_engage(
+                        account_key=actor_account_key,
+                        pool_size=choice.pool_size,
+                        action="reply",
                     )
-                    reply_id = await reply_tweet(notif.tweet_id, content)
+                    if strategy_skip:
+                        notif.auto_engage_status = "skipped"
+                        notif.auto_engage_error = strategy_skip
+                        await db.commit()
+                        logger.info(
+                            "Skipped auto-reply for notification %s: %s",
+                            notification_id,
+                            strategy_skip,
+                        )
+                        return
+                    guard_error = guard.check_allowed(
+                        account_key=actor_account_key,
+                        action="reply",
+                        min_interval_seconds=settings.auto_action_min_interval_seconds,
+                        per_hour_limit=settings.auto_reply_hourly_limit,
+                        per_day_limit=settings.auto_action_daily_limit,
+                    )
+                    if guard_error:
+                        notif.auto_engage_status = "skipped"
+                        notif.auto_engage_error = guard_error
+                        await db.commit()
+                        logger.info(
+                            "Skipped auto-reply for notification %s: %s",
+                            notification_id,
+                            guard_error,
+                        )
+                        return
+                    async with using_twitter_account(actor_account_key):
+                        content = await _generate_reply_content(
+                            notif.tweet_text, notif.author_username
+                        )
+                        reply_id = await reply_tweet(notif.tweet_id, content)
+                    guard.record_success(account_key=actor_account_key, action="reply")
                     notif.is_commented = True
                     notif.comment_text = content
                     notif.commented_at = datetime.now(timezone.utc)
@@ -319,14 +434,53 @@ class TwitterMonitorService:
                     )
 
                 if action in ("retweet", "both"):
-                    await retweet_tweet(notif.tweet_id)
-                    if not notif.is_commented:
-                        notif.is_commented = True
-                        notif.comment_text = "[retweet]"
-                        notif.commented_at = datetime.now(timezone.utc)
-                    logger.info(
-                        f"Auto-retweeted tweet {notif.tweet_id} from @{notif.author_username}"
+                    strategy_skip = strategy.should_skip_auto_engage(
+                        account_key=actor_account_key,
+                        pool_size=choice.pool_size,
+                        action="retweet",
                     )
+                    if strategy_skip and action == "retweet":
+                        notif.auto_engage_status = "skipped"
+                        notif.auto_engage_error = strategy_skip
+                        await db.commit()
+                        logger.info(
+                            "Skipped auto-retweet for notification %s: %s",
+                            notification_id,
+                            strategy_skip,
+                        )
+                        return
+                    guard_error = guard.check_allowed(
+                        account_key=actor_account_key,
+                        action="retweet",
+                        min_interval_seconds=settings.auto_action_min_interval_seconds,
+                        per_hour_limit=settings.auto_retweet_hourly_limit,
+                        per_day_limit=settings.auto_action_daily_limit,
+                    )
+                    if guard_error:
+                        if action == "retweet":
+                            notif.auto_engage_status = "skipped"
+                            notif.auto_engage_error = guard_error
+                            await db.commit()
+                            logger.info(
+                                "Skipped auto-retweet for notification %s: %s",
+                                notification_id,
+                                guard_error,
+                            )
+                            return
+                        notif.auto_engage_error = guard_error
+                    elif strategy_skip:
+                        notif.auto_engage_error = strategy_skip
+                    else:
+                        async with using_twitter_account(actor_account_key):
+                            await retweet_tweet(notif.tweet_id)
+                        guard.record_success(account_key=actor_account_key, action="retweet")
+                        if not notif.is_commented:
+                            notif.is_commented = True
+                            notif.comment_text = "[retweet]"
+                            notif.commented_at = datetime.now(timezone.utc)
+                        logger.info(
+                            f"Auto-retweeted tweet {notif.tweet_id} from @{notif.author_username}"
+                        )
 
                 notif.auto_engage_status = "done"
                 await db.commit()

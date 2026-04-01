@@ -12,25 +12,23 @@ class MonitorRouterTests(unittest.IsolatedAsyncioTestCase):
         db = AsyncMock()
         db.scalar = AsyncMock(side_effect=[None, None, None, None, None])
 
-        with (
-            patch("app.services.twitter_api.get_active_auth_state", AsyncMock(return_value={"active_username": "test_user"})),
-            patch("app.routers.monitor.get_twitter_risk_control") as risk_control_mock,
-        ):
-            risk_control_mock.return_value.get_state.return_value = {
-                "risk_account_key": "test_user",
-                "risk_stage": "normal",
-                "write_blocked": False,
-                "write_block_reason": None,
-                "write_resume_seconds": 0,
-                "auth_backoff_until": None,
-                "read_only_until": None,
-                "recovery_until": None,
-                "last_risk_error": None,
-                "last_risk_event_at": None,
-                "is_persisted": False,
-            }
+        with patch("app.services.twitter_api.get_active_auth_state", AsyncMock(return_value={"active_username": "test_user"})):
+            with patch("app.routers.monitor.get_twitter_risk_control") as risk_control_mock:
+                risk_control_mock.return_value.get_state.return_value = {
+                    "risk_account_key": "test_user",
+                    "risk_stage": "normal",
+                    "write_blocked": False,
+                    "write_block_reason": None,
+                    "write_resume_seconds": 0,
+                    "auth_backoff_until": None,
+                    "read_only_until": None,
+                    "recovery_until": None,
+                    "last_risk_error": None,
+                    "last_risk_event_at": None,
+                    "is_persisted": False,
+                }
 
-            response = await monitor_router.get_stats(db)
+                response = await monitor_router.get_stats(db)
 
         self.assertEqual(response["total_accounts"], 0)
         self.assertEqual(response["active_accounts"], 0)
@@ -60,18 +58,23 @@ class MonitorRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.exception.status_code, 500)
         self.assertEqual(ctx.exception.detail, "broken select")
 
-    async def test_create_account_preserves_http_exception(self):
+    async def test_create_account_reuses_existing_username(self):
         db = AsyncMock()
-        db.execute = AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: object()))
+        existing = SimpleNamespace(account_key="old_key", priority=3, is_active=False)
+        db.execute = AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: existing))
 
-        with self.assertRaises(HTTPException) as ctx:
-            await monitor_router.create_account(
+        with patch("app.routers.monitor.get_effective_account_key", AsyncMock(return_value="LinRui0203")):
+            response = await monitor_router.create_account(
                 monitor_router.MonitoredAccountCreate(username="already_exists"),
                 db=db,
             )
 
-        self.assertEqual(ctx.exception.status_code, 400)
-        self.assertEqual(ctx.exception.detail, "Account already being monitored")
+        self.assertIs(response, existing)
+        self.assertEqual(existing.account_key, "LinRui0203")
+        self.assertEqual(existing.priority, 2)
+        self.assertTrue(existing.is_active)
+        db.commit.assert_awaited()
+        db.refresh.assert_awaited_with(existing)
 
 
 if __name__ == "__main__":

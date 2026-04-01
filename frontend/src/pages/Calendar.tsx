@@ -1,9 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Calendar as CalendarIcon, ChevronLeft, ChevronRight } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { tweetsApi, formatTwitterActionError } from '@/services/api'
+import { tweetsApi, formatTwitterActionError, logClientError } from '@/services/api'
 import type { Tweet } from '@/types'
 import { getStatusColor, getStatusText } from '@/lib/utils'
 
@@ -13,22 +13,23 @@ export default function CalendarPage() {
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
 
-  useEffect(() => {
-    loadTweets()
-  }, [])
-
-  const loadTweets = async () => {
+  const loadTweets = useCallback(async () => {
+    setLoading(true)
     try {
       setLoadError('')
       const res = await tweetsApi.list('scheduled', 0, 100)
       setTweets(res.items)
     } catch (error) {
-      console.error('Failed to load scheduled tweets:', error)
+      logClientError('Calendar.loadTweets', error)
       setLoadError(formatTwitterActionError(error, '排期日历加载失败'))
     } finally {
       setLoading(false)
     }
-  }
+  }, [])
+
+  useEffect(() => {
+    loadTweets()
+  }, [loadTweets])
 
   const getDaysInMonth = (date: Date) => {
     const year = date.getFullYear()

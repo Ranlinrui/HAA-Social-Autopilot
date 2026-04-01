@@ -7,6 +7,7 @@ services:
       dockerfile: Dockerfile
     ports:
       - "${BACKEND_PORT:-8000}:8000"
+      - "${BACKEND_VNC_PORT:-6080}:6080"
     volumes:
       - ./backend/uploads:/app/uploads
       - ./backend/data:/app/data

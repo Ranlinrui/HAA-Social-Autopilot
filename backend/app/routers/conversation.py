@@ -7,6 +7,7 @@ from sqlalchemy import select, desc
 
 from app.database import get_db
 from app.models.conversation import ConversationThread, ConversationSetting
+from app.services.twitter_account_store import get_effective_account_key, using_twitter_account
 from app.services.twitter_api import reply_tweet
 from app.services.conversation_service import conversation_service
 from app.services.twitter_risk_control import get_twitter_risk_control
@@ -23,6 +24,7 @@ class ThreadOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    account_key: Optional[str]
     root_tweet_id: str
     root_tweet_text: Optional[str]
     our_reply_id: str
@@ -89,11 +91,13 @@ async def list_threads(
     db: AsyncSession = Depends(get_db)
 ):
     try:
-        query = select(ConversationThread).order_by(desc(ConversationThread.created_at)).limit(limit)
+        account_key = await get_effective_account_key()
+        query = select(ConversationThread)
+        if account_key:
+            query = query.where(ConversationThread.account_key == account_key)
         if status:
-            query = select(ConversationThread).where(
-                ConversationThread.status == status
-            ).order_by(desc(ConversationThread.created_at)).limit(limit)
+            query = query.where(ConversationThread.status == status)
+        query = query.order_by(desc(ConversationThread.created_at)).limit(limit)
         result = await db.execute(query)
         return result.scalars().all()
     except Exception as e:
@@ -151,7 +155,8 @@ async def manual_reply(
         raise HTTPException(status_code=400, detail="Thread already replied")
 
     try:
-        reply_id = await reply_tweet(thread.latest_mention_id, body.content)
+        async with using_twitter_account(thread.account_key):
+            reply_id = await reply_tweet(thread.latest_mention_id, body.content)
     except Exception as e:
         raise HTTPException(status_code=500, detail=_error_detail(e))
 
@@ -240,12 +245,17 @@ async def get_stats(db: AsyncSession = Depends(get_db)):
     from app.services.twitter_api import get_active_auth_state
 
     try:
-        total_result = await db.execute(select(func.count(ConversationThread.id)))
+        account_key = await get_effective_account_key()
+        total_query = select(func.count(ConversationThread.id))
+        if account_key:
+            total_query = total_query.where(ConversationThread.account_key == account_key)
+        total_result = await db.execute(total_query)
         total = total_result.scalar() or 0
 
-        pending_result = await db.execute(
-            select(func.count(ConversationThread.id)).where(ConversationThread.status == "pending")
-        )
+        pending_query = select(func.count(ConversationThread.id)).where(ConversationThread.status == "pending")
+        if account_key:
+            pending_query = pending_query.where(ConversationThread.account_key == account_key)
+        pending_result = await db.execute(pending_query)
         pending = pending_result.scalar() or 0
 
         cfg = await _get_or_create_settings(db)

@@ -8,6 +8,7 @@ class MonitoredAccount(Base):
     __tablename__ = "monitored_accounts"
 
     id = Column(Integer, primary_key=True, index=True)
+    account_key = Column(String(100), nullable=True, index=True)
     username = Column(String(50), unique=True, nullable=False, index=True)
     user_id = Column(String(50), nullable=True)
     display_name = Column(String(100), nullable=True)
@@ -28,6 +29,7 @@ class MonitorNotification(Base):
     __tablename__ = "monitor_notifications"
 
     id = Column(Integer, primary_key=True, index=True)
+    account_key = Column(String(100), nullable=True, index=True)
     account_id = Column(Integer, nullable=False, index=True)
     tweet_id = Column(String(50), unique=True, nullable=False, index=True)
     tweet_text = Column(Text, nullable=False)

@@ -2,7 +2,15 @@ import unittest
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock
 
-from app.services.twitter_browser import TwitterBrowser, _CACHE_MISS, _extract_graphql_error
+from app.services.twitter_browser import (
+    TwitterBrowser,
+    _CACHE_MISS,
+    _build_button_text_patterns,
+    _detect_login_prompt_kind,
+    _extract_graphql_error,
+    _mask_login_value,
+    _select_login_challenge_value,
+)
 
 
 class TwitterBrowserCacheTests(unittest.IsolatedAsyncioTestCase):
@@ -94,6 +102,57 @@ class TwitterBrowserCacheTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(username, "cookie_user")
         browser._assert_account_available.assert_awaited_once()
+
+    def test_select_login_challenge_value_prefers_username_for_username_prompt(self):
+        value = _select_login_challenge_value(
+            "Enter your phone number or username",
+            "user_abc",
+            "user@example.com",
+        )
+        self.assertEqual(value, "user_abc")
+
+    def test_select_login_challenge_value_prefers_email_for_email_prompt(self):
+        value = _select_login_challenge_value(
+            "Confirm your email address",
+            "user_abc",
+            "user@example.com",
+        )
+        self.assertEqual(value, "user@example.com")
+
+    def test_detect_login_prompt_kind_identifies_identifier_page(self):
+        self.assertEqual(
+            _detect_login_prompt_kind(
+                "View keyboard shortcuts Sign in to X Phone, email, or username Next Forgot password?"
+            ),
+            "identifier",
+        )
+
+    def test_detect_login_prompt_kind_identifies_challenge_page(self):
+        self.assertEqual(
+            _detect_login_prompt_kind("We found more than one account. Enter your phone number or username"),
+            "challenge",
+        )
+
+    def test_detect_login_prompt_kind_identifies_email_or_phone_check_page(self):
+        self.assertEqual(_detect_login_prompt_kind("Check your email to continue"), "challenge")
+        self.assertEqual(_detect_login_prompt_kind("Check your phone before signing in"), "challenge")
+
+    def test_detect_login_prompt_kind_identifies_password_page(self):
+        self.assertEqual(
+            _detect_login_prompt_kind("Enter your password to continue"),
+            "password",
+        )
+
+    def test_build_button_text_patterns_adds_expected_aliases(self):
+        next_patterns = [pattern.pattern for pattern in _build_button_text_patterns("next")]
+        login_patterns = [pattern.pattern for pattern in _build_button_text_patterns("log in")]
+
+        self.assertEqual(len(next_patterns), 3)
+        self.assertEqual(len(login_patterns), 3)
+
+    def test_mask_login_value_masks_email_and_username(self):
+        self.assertEqual(_mask_login_value("user@example.com"), "us**@example.com")
+        self.assertEqual(_mask_login_value("linrui0203"), "li******03")
 
 
 

@@ -32,6 +32,7 @@ class Tweet(Base):
     __tablename__ = "tweets"
 
     id = Column(Integer, primary_key=True, index=True)
+    account_key = Column(String(100), nullable=True, index=True)
     content = Column(Text, nullable=False)
     tweet_type = Column(SQLEnum(TweetType), default=TweetType.TEXT)
     status = Column(SQLEnum(TweetStatus), default=TweetStatus.DRAFT)

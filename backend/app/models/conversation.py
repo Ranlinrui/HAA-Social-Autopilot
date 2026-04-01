@@ -11,6 +11,7 @@ class ConversationThread(Base):
     __tablename__ = "conversation_threads"
 
     id = Column(Integer, primary_key=True, index=True)
+    account_key = Column(String(100), nullable=True, index=True)
 
     # The tweet we originally replied to
     root_tweet_id = Column(String(50), nullable=False, index=True)

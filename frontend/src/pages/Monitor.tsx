@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
-import api, { formatTwitterActionError } from '@/services/api'
+import api, { formatTwitterActionError, logClientError } from '@/services/api'
 import { InlineConfirm } from '@/components/InlineConfirm'
 import { InlineNotice } from '@/components/InlineNotice'
 import { TwitterRiskBanner, getWriteBlockedReason, type TwitterRiskStateLike } from '@/components/TwitterRiskStatus'
@@ -27,6 +27,7 @@ interface MonitoredAccount {
 
 interface Notification {
   id: number
+  account_key?: string
   account_id: number
   tweet_id: string
   tweet_text: string
@@ -55,6 +56,10 @@ interface Stats extends TwitterRiskStateLike {
   read_only_until?: string
   auth_backoff_until?: string
   recovery_until?: string
+  auto_engage_ready_accounts?: string[]
+  auto_engage_ready_count?: number
+  auto_engage_total_matrix_accounts?: number
+  auto_engage_strategy_mode?: string
 }
 
 export default function Monitor() {
@@ -88,7 +93,7 @@ export default function Monitor() {
 
   useEffect(() => {
     loadData()
-    const interval = setInterval(loadData, 30000) // Refresh every 30s
+    const interval = setInterval(loadData, 120000) // Refresh every 2 minutes in low-traffic mode
     return () => clearInterval(interval)
   }, [])
 
@@ -138,7 +143,7 @@ export default function Monitor() {
         setLoadError(formatTwitterActionError(firstError, '部分监控数据加载失败'))
       }
     } catch (error) {
-      console.error('Failed to load data:', error)
+      logClientError('Monitor.loadData', error)
       setLoadError(formatTwitterActionError(error, '监控数据加载失败'))
     } finally {
       setLoading(false)
@@ -405,6 +410,39 @@ export default function Monitor() {
 
       <TwitterRiskBanner state={stats} />
 
+      {stats && (
+        <Card>
+          <CardHeader>
+            <CardTitle>自动互动矩阵</CardTitle>
+            <CardDescription>
+              当前自动互动不是盲目全量执行，而是按矩阵账号可用性、随机跳过和负载动态降速来分配。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm">
+            <div className="flex flex-wrap gap-2">
+              <Badge variant="outline">
+                可用账号 {stats.auto_engage_ready_count || 0}/{stats.auto_engage_total_matrix_accounts || 0}
+              </Badge>
+              <Badge variant="outline">
+                策略 {stats.auto_engage_strategy_mode === 'matrix_rotation' ? '矩阵轮换' : '单账号谨慎模式'}
+              </Badge>
+            </div>
+            {(stats.auto_engage_ready_accounts || []).length > 0 ? (
+              <div className="text-muted-foreground">
+                当前可参与自动互动的账号：
+                <span className="ml-1 font-medium text-foreground">
+                  {(stats.auto_engage_ready_accounts || []).map((item) => `@${item}`).join('、')}
+                </span>
+              </div>
+            ) : (
+              <div className="text-amber-700">
+                当前没有可用于自动互动的矩阵账号。请先在设置页补充账号并导入对应 Cookie。
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
       {stats && (stats.backoff_seconds || 0) > 0 && (
         <Card className="border-amber-200 bg-amber-50">
           <CardContent className="pt-6">
@@ -607,8 +645,28 @@ export default function Monitor() {
                       {!notif.is_commented && notif.auto_engage_status === 'failed' && (
                         <Badge variant="outline" className="bg-red-50 text-red-700">自动失败</Badge>
                       )}
+                      {!notif.is_commented && notif.auto_engage_status === 'skipped' && (
+                        <Badge variant="outline" className="bg-amber-50 text-amber-700">已跳过</Badge>
+                      )}
                     </div>
                     <p className="text-sm mb-2 leading-relaxed">{notif.tweet_text}</p>
+                    <div className="space-y-1 text-xs text-muted-foreground">
+                      {notif.account_key && (
+                        <div>
+                          执行账号：<span className="font-medium text-foreground">@{notif.account_key}</span>
+                        </div>
+                      )}
+                      {notif.auto_engage_status && (
+                        <div>
+                          自动状态：<span className="font-medium text-foreground">{notif.auto_engage_status}</span>
+                        </div>
+                      )}
+                      {notif.auto_engage_error && (
+                        <div>
+                          跳过/失败原因：<span className="text-foreground">{notif.auto_engage_error}</span>
+                        </div>
+                      )}
+                    </div>
                     <a
                       href={notif.tweet_url}
                       target="_blank"

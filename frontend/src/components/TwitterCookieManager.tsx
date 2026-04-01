@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Eye, EyeOff, CheckCircle, XCircle, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -25,6 +25,8 @@ interface CookieStatus {
 
 interface TwitterCookieManagerProps {
   onStatusChange?: (status: CookieStatus | null) => void
+  defaultAccountName?: string
+  accountOptions?: Array<{ account_key: string; username: string }>
 }
 
 function formatFetchErrorMessage(error: unknown, fallback: string) {
@@ -37,15 +39,30 @@ function formatFetchErrorMessage(error: unknown, fallback: string) {
 }
 
 async function requestJson(path: string, init?: RequestInit) {
-  const response = await fetch(`${API_BASE}${path}`, init)
-  const payload = await response.json().catch(() => ({}))
-  if (!response.ok) {
-    throw { response: { status: response.status, data: payload } }
+  const controller = new AbortController()
+  const timeoutId = window.setTimeout(() => controller.abort(), 30000)
+
+  try {
+    const response = await fetch(`${API_BASE}${path}`, {
+      ...init,
+      signal: controller.signal,
+    })
+    const payload = await response.json().catch(() => ({}))
+    if (!response.ok) {
+      throw { response: { status: response.status, data: payload } }
+    }
+    return payload
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw { message: 'timeout of 30000ms exceeded' }
+    }
+    throw error
+  } finally {
+    window.clearTimeout(timeoutId)
   }
-  return payload
 }
 
-export default function TwitterCookieManager({ onStatusChange }: TwitterCookieManagerProps) {
+export default function TwitterCookieManager({ onStatusChange, defaultAccountName, accountOptions = [] }: TwitterCookieManagerProps) {
   const [authToken, setAuthToken] = useState('')
   const [ct0, setCt0] = useState('')
   const [accountName, setAccountName] = useState('')
@@ -57,25 +74,51 @@ export default function TwitterCookieManager({ onStatusChange }: TwitterCookieMa
   const [testResult, setTestResult] = useState<TestResult | null>(null)
   const [saveMessage, setSaveMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null)
   const [cookieStatus, setCookieStatus] = useState<CookieStatus | null>(null)
+  const onStatusChangeRef = useRef(onStatusChange)
+  const statusRequestRef = useRef<Promise<void> | null>(null)
+
+  useEffect(() => {
+    onStatusChangeRef.current = onStatusChange
+  }, [onStatusChange])
 
   const loadStatus = useCallback(async () => {
-    setStatusLoading(true)
-    try {
-      const result = await requestJson('/cookies/status')
-      setCookieStatus(result)
-      onStatusChange?.(result)
-    } catch (error) {
-      const fallback = { configured: false, message: formatFetchErrorMessage(error, '无法读取当前 Cookie 状态') }
-      setCookieStatus(fallback)
-      onStatusChange?.(fallback)
-    } finally {
-      setStatusLoading(false)
+    if (statusRequestRef.current) {
+      await statusRequestRef.current
+      return
     }
-  }, [onStatusChange])
+
+    const task = (async () => {
+      setStatusLoading(true)
+      try {
+        const result = await requestJson('/cookies/status')
+        setCookieStatus(result)
+        onStatusChangeRef.current?.(result)
+      } catch (error) {
+        const fallback = { configured: false, message: formatFetchErrorMessage(error, '无法读取当前 Cookie 状态') }
+        setCookieStatus(fallback)
+        onStatusChangeRef.current?.(fallback)
+      } finally {
+        setStatusLoading(false)
+      }
+    })()
+
+    statusRequestRef.current = task
+    try {
+      await task
+    } finally {
+      statusRequestRef.current = null
+    }
+  }, [])
 
   useEffect(() => {
     void loadStatus()
   }, [loadStatus])
+
+  useEffect(() => {
+    if (!accountName.trim() && defaultAccountName?.trim()) {
+      setAccountName(defaultAccountName.trim().replace(/^@/, ''))
+    }
+  }, [accountName, defaultAccountName])
 
   const handleTest = async () => {
     if (!authToken || !ct0) {
@@ -93,7 +136,7 @@ export default function TwitterCookieManager({ onStatusChange }: TwitterCookieMa
         body: JSON.stringify({
           auth_token: authToken,
           ct0: ct0,
-          account_name: accountName || 'default'
+          account_name: accountName.trim() || defaultAccountName?.trim().replace(/^@/, '') || 'default'
         })
       })
       setTestResult(result)
@@ -122,7 +165,7 @@ export default function TwitterCookieManager({ onStatusChange }: TwitterCookieMa
         body: JSON.stringify({
           auth_token: authToken,
           ct0: ct0,
-          account_name: accountName || 'default'
+          account_name: accountName.trim() || defaultAccountName?.trim().replace(/^@/, '') || 'default'
         })
       })
       setSaveMessage({ type: 'success', text: 'Cookies 已保存。' })
@@ -229,13 +272,32 @@ export default function TwitterCookieManager({ onStatusChange }: TwitterCookieMa
 
         {/* Account Name */}
         <div className="space-y-2">
-          <label htmlFor="account_name" className="text-sm font-medium">账号名称（可选）</label>
-          <Input
-            id="account_name"
-            placeholder="例如: my_twitter_account"
-            value={accountName}
-            onChange={(e) => setAccountName(e.target.value)}
-          />
+          <label htmlFor="account_name" className="text-sm font-medium">绑定矩阵账号</label>
+          {accountOptions.length > 0 ? (
+            <select
+              id="account_name"
+              className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+              value={accountName}
+              onChange={(e) => setAccountName(e.target.value)}
+            >
+              <option value="">选择一个矩阵账号</option>
+              {accountOptions.map((item) => (
+                <option key={item.account_key} value={item.account_key}>
+                  @{item.username} ({item.account_key})
+                </option>
+              ))}
+            </select>
+          ) : (
+            <Input
+              id="account_name"
+              placeholder="例如: my_twitter_account"
+              value={accountName}
+              onChange={(e) => setAccountName(e.target.value)}
+            />
+          )}
+          <p className="text-xs text-muted-foreground">
+            这份 Cookie 会绑定到指定矩阵账号，避免不同账号共用同一份会话。
+          </p>
         </div>
 
         {/* Auth Token */}

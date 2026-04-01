@@ -1,13 +1,16 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, desc
+from sqlalchemy import select, func, desc, or_
 from pydantic import BaseModel, ConfigDict
 from typing import List, Optional
 from datetime import datetime, timezone
 
 from app.database import get_db
 from app.models.monitor import MonitoredAccount, MonitorNotification
+from app.models.twitter_account import TwitterAccount
 from app.services.monitor_service import monitor_service
+from app.services.twitter_account_store import get_effective_account_key
+from app.services.twitter_engage_strategy import get_twitter_engage_strategy
 from app.services.twitter_risk_control import get_twitter_risk_control
 from app.services.twitter_auth_backoff import seconds_until_backoff_expires
 
@@ -19,6 +22,12 @@ def _error_detail(exc: Exception, fallback: str) -> str:
     return detail or fallback
 
 
+def _account_scope(account_key: str | None, column):
+    if not account_key:
+        return None
+    return or_(column == account_key, column.is_(None))
+
+
 class MonitoredAccountCreate(BaseModel):
     username: str
     priority: int = 2
@@ -28,6 +37,7 @@ class MonitoredAccountResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    account_key: Optional[str]
     username: str
     user_id: Optional[str]
     display_name: Optional[str]
@@ -51,6 +61,7 @@ class MonitorNotificationResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    account_key: Optional[str]
     account_id: int
     tweet_id: str
     tweet_text: str
@@ -62,6 +73,8 @@ class MonitorNotificationResponse(BaseModel):
     is_commented: bool
     comment_text: Optional[str]
     commented_at: Optional[datetime]
+    auto_engage_status: Optional[str]
+    auto_engage_error: Optional[str]
 
 
 class CommentRequest(BaseModel):
@@ -75,7 +88,11 @@ async def list_accounts(
 ):
     """Get list of monitored accounts"""
     try:
+        account_key = await get_effective_account_key()
         query = select(MonitoredAccount)
+        scope = _account_scope(account_key, MonitoredAccount.account_key)
+        if scope is not None:
+            query = query.where(scope)
         if is_active is not None:
             query = query.where(MonitoredAccount.is_active == is_active)
         query = query.order_by(MonitoredAccount.priority, MonitoredAccount.username)
@@ -95,6 +112,7 @@ async def create_account(
     """Add a new account to monitor"""
     try:
         username = account.username.lstrip('@')
+        account_key = await get_effective_account_key()
 
         result = await db.execute(
             select(MonitoredAccount).where(MonitoredAccount.username == username)
@@ -102,9 +120,16 @@ async def create_account(
         existing = result.scalar_one_or_none()
 
         if existing:
-            raise HTTPException(status_code=400, detail="Account already being monitored")
+            if existing.account_key is None or account_key:
+                existing.account_key = account_key
+            existing.priority = account.priority
+            existing.is_active = True
+            await db.commit()
+            await db.refresh(existing)
+            return existing
 
         new_account = MonitoredAccount(
+            account_key=account_key,
             username=username,
             priority=account.priority,
             is_active=True
@@ -208,7 +233,11 @@ async def list_notifications(
 ):
     """Get list of tweet notifications"""
     try:
+        account_key = await get_effective_account_key()
         query = select(MonitorNotification)
+        scope = _account_scope(account_key, MonitorNotification.account_key)
+        if scope is not None:
+            query = query.where(scope)
 
         if is_commented is not None:
             query = query.where(MonitorNotification.is_commented == is_commented)
@@ -259,10 +288,17 @@ async def get_stats(db: AsyncSession = Depends(get_db)):
     from app.services.twitter_api import get_active_auth_state
 
     try:
+        account_key = await get_effective_account_key()
         total_accounts = await db.scalar(select(func.count()).select_from(MonitoredAccount))
-        active_accounts = await db.scalar(
-            select(func.count()).select_from(MonitoredAccount).where(MonitoredAccount.is_active == True)
-        )
+        active_accounts_query = select(func.count()).select_from(MonitoredAccount).where(MonitoredAccount.is_active == True)
+        account_scope = _account_scope(account_key, MonitoredAccount.account_key)
+        notification_scope = _account_scope(account_key, MonitorNotification.account_key)
+        if account_scope is not None:
+            total_accounts = await db.scalar(
+                select(func.count()).select_from(MonitoredAccount).where(account_scope)
+            )
+            active_accounts_query = active_accounts_query.where(account_scope)
+        active_accounts = await db.scalar(active_accounts_query)
 
         total_notifications = await db.scalar(select(func.count()).select_from(MonitorNotification))
         commented_notifications = await db.scalar(
@@ -276,14 +312,34 @@ async def get_stats(db: AsyncSession = Depends(get_db)):
             )
         )
 
+        if notification_scope is not None:
+            total_notifications = await db.scalar(
+                select(func.count()).select_from(MonitorNotification).where(notification_scope)
+            )
+            commented_notifications = await db.scalar(
+                select(func.count()).select_from(MonitorNotification).where(
+                    notification_scope,
+                    MonitorNotification.is_commented == True,
+                )
+            )
+            today_notifications = await db.scalar(
+                select(func.count()).select_from(MonitorNotification).where(
+                    notification_scope,
+                    func.date(MonitorNotification.notified_at) == today,
+                )
+            )
+
         auth_state = await get_active_auth_state("reply")
         risk_state = get_twitter_risk_control().get_state(auth_state.get("active_username"))
+        ready_account_keys = await get_twitter_engage_strategy().list_ready_account_keys()
+        total_matrix_accounts = await db.scalar(select(func.count()).select_from(TwitterAccount))
 
         total_accounts = int(total_accounts or 0)
         active_accounts = int(active_accounts or 0)
         total_notifications = int(total_notifications or 0)
         commented_notifications = int(commented_notifications or 0)
         today_notifications = int(today_notifications or 0)
+        total_matrix_accounts = int(total_matrix_accounts or 0)
 
         return {
             "total_accounts": total_accounts,
@@ -295,6 +351,10 @@ async def get_stats(db: AsyncSession = Depends(get_db)):
             "monitor_running": monitor_service.is_running,
             "backoff_seconds": seconds_until_backoff_expires(monitor_service.auth_backoff_until),
             "backoff_until": monitor_service.auth_backoff_until,
+            "auto_engage_ready_accounts": ready_account_keys,
+            "auto_engage_ready_count": len(ready_account_keys),
+            "auto_engage_total_matrix_accounts": total_matrix_accounts,
+            "auto_engage_strategy_mode": "matrix_rotation" if len(ready_account_keys) > 1 else "single_account_cautious",
             **risk_state,
         }
     except Exception as exc:

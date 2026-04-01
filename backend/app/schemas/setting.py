@@ -43,6 +43,71 @@ class TwitterLoginResponse(BaseModel):
     username: Optional[str] = None
 
 
+class TwitterBrowserSessionResponse(BaseModel):
+    success: bool
+    message: str
+    username: Optional[str] = None
+    ready: bool = False
+    updated_at: Optional[datetime] = None
+
+
+class TwitterBrowserTakeoverRequest(BaseModel):
+    username: str
+    email: Optional[str] = None
+    password: Optional[str] = None
+
+
+class TwitterBrowserTakeoverResponse(BaseModel):
+    success: bool
+    message: str
+    username: Optional[str] = None
+    account_key: Optional[str] = None
+    ready: bool = False
+    manual_login_active: bool = False
+    vnc_url: Optional[str] = None
+    updated_at: Optional[datetime] = None
+    session_health: Optional[Dict[str, Any]] = None
+
+
+class TwitterAccountUpsertRequest(BaseModel):
+    account_key: str
+    username: str
+    email: Optional[str] = None
+    password: Optional[str] = None
+    is_active: bool = False
+
+
+class TwitterAccountResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    account_key: str
+    username: str
+    email: Optional[str] = None
+    is_active: bool
+    password_saved: bool = False
+    cookie_ready: bool = False
+    browser_session_ready: bool = False
+    automation_ready: bool = False
+    last_login_status: Optional[str] = None
+    last_login_message: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class TwitterAccountHealthCheckResponse(BaseModel):
+    success: bool
+    account_key: str
+    username: str
+    cookie_ready: bool = False
+    browser_session_ready: bool = False
+    automation_ready: bool = False
+    twikit_ok: bool = False
+    twikit_message: str
+    browser_message: str
+    checked_at: datetime
+
+
 class TwitterAuthStateResponse(BaseModel):
     feature: str
     selected_mode: str

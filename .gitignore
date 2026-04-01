@@ -76,6 +76,9 @@ htmlcov/
 # Twitter cookies
 twitter_cookies.json
 data/twitter_cookies.json
+backend/data/twitter_browser_login_diagnostic.json
+backend/data/twitter_cookies/
+backend/data/twitter_browser_state/
 
 # Local-only documentation
 README.local.md

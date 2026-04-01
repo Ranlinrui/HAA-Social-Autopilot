@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { InlineNotice } from '@/components/InlineNotice'
-import api, { formatTwitterActionError } from '@/services/api'
+import api, { formatTwitterActionError, logClientError } from '@/services/api'
 import { TwitterRiskBanner, getWriteBlockedReason, type TwitterRiskStateLike } from '@/components/TwitterRiskStatus'
 import { TwitterGuardedButton } from '@/components/TwitterGuardedButton'
 
@@ -137,7 +137,7 @@ export default function Conversations() {
         setLoadError(formatTwitterActionError(firstError, '部分对话数据加载失败'))
       }
     } catch (e) {
-      console.error('Failed to load conversations:', e)
+      logClientError('Conversations.loadAll', e)
       setLoadError(formatTwitterActionError(e, '对话数据加载失败'))
     } finally {
       setLoading(false)
@@ -146,7 +146,7 @@ export default function Conversations() {
 
   useEffect(() => {
     loadAll()
-    const interval = setInterval(loadAll, 30000)
+    const interval = setInterval(loadAll, 120000)
     return () => clearInterval(interval)
   }, [loadAll])
 

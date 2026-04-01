@@ -13,6 +13,7 @@ from app.config import settings as app_settings
 from app.database import async_session
 from app.models.setting import Setting
 from app.models.tweet import Tweet
+from app.services.twitter_account_store import get_account_cookie_file, get_effective_account_key
 from app.services.twitter_risk_control import get_twitter_risk_control
 
 COOKIE_FILE = "/app/data/twitter_cookies.json"
@@ -57,11 +58,12 @@ async def _load_setting_values(keys: Iterable[str]) -> dict[str, str]:
         return {key: value for key, value in result.all()}
 
 
-def _load_cookie_state() -> dict | None:
-    if not os.path.exists(COOKIE_FILE):
+def _load_cookie_state(cookie_file: str | None = None) -> dict | None:
+    target_file = cookie_file or COOKIE_FILE
+    if not os.path.exists(target_file):
         return None
     try:
-        with open(COOKIE_FILE, "r") as f:
+        with open(target_file, "r") as f:
             data = json.load(f)
     except Exception:
         return None
@@ -108,7 +110,10 @@ async def _call_engine(
 async def get_active_auth_state(feature: str | None = None) -> dict:
     keys = ["twitter_username", "twitter_publish_mode", *TWITTER_FEATURE_SETTING_KEYS.values()]
     values = await _load_setting_values(keys)
-    cookie_state = _load_cookie_state()
+    effective_account_key = await get_effective_account_key()
+    cookie_state = _load_cookie_state(get_account_cookie_file(effective_account_key) if effective_account_key else None)
+    if cookie_state is None:
+        cookie_state = _load_cookie_state()
 
     feature_name = feature or "default"
     selected_mode = await _get_mode_for_feature(feature_name)
@@ -116,7 +121,7 @@ async def get_active_auth_state(feature: str | None = None) -> dict:
     cookie_username = ""
     if cookie_state:
         cookie_username = cookie_state.get("username") or cookie_state.get("account_name") or ""
-    active_username = cookie_username or configured_username or None
+    active_username = effective_account_key or cookie_username or configured_username or None
     risk_state = get_twitter_risk_control().get_state(active_username)
 
     return {

@@ -7,7 +7,7 @@ import { InlineNotice } from '@/components/InlineNotice'
 import { Textarea } from '@/components/ui/textarea'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
-import { tweetsApi, llmApi, mediaApi, formatTwitterActionError } from '@/services/api'
+import { tweetsApi, llmApi, mediaApi, formatTwitterActionError, logClientError } from '@/services/api'
 import { useTweetStore } from '@/stores'
 import { formatDate, getStatusColor, getStatusText } from '@/lib/utils'
 import type { LLMTemplate, Media } from '@/types'
@@ -50,7 +50,7 @@ export default function Tweets() {
       const res = await tweetsApi.list()
       setTweets(res.items, res.total)
     } catch (error) {
-      console.error('Failed to load tweets:', error)
+      logClientError('Tweets.loadTweets', error)
       setLoadError(formatTwitterActionError(error, '推文列表加载失败'))
     } finally {
       setLoading(false)
@@ -69,7 +69,7 @@ export default function Tweets() {
       setTemplates(res)
       setTemplatesLoaded(true)
     } catch (error) {
-      console.error('Failed to load templates:', error)
+      logClientError('Tweets.loadTemplates', error)
       setActionMessage({ tone: 'error', title: '模板加载失败', message: formatTwitterActionError(error, 'AI 模板加载失败') })
     } finally {
       setTemplatesLoading(false)
@@ -84,7 +84,7 @@ export default function Tweets() {
       setMediaList(res.items)
       setMediaLoaded(true)
     } catch (error) {
-      console.error('Failed to load media:', error)
+      logClientError('Tweets.loadMediaList', error)
       setActionMessage({ tone: 'error', title: '素材列表加载失败', message: formatTwitterActionError(error, '素材列表加载失败') })
     } finally {
       setMediaLoading(false)
@@ -140,7 +140,7 @@ export default function Tweets() {
       setShowCreate(false)
       setActionMessage({ tone: 'success', title: '推文已创建', message: '草稿已保存到推文列表。' })
     } catch (error) {
-      console.error('Failed to create tweet:', error)
+      logClientError('Tweets.handleCreate', error)
       setActionMessage({ tone: 'error', title: '创建推文失败', message: formatTwitterActionError(error, '创建推文失败') })
     }
   }
@@ -152,7 +152,7 @@ export default function Tweets() {
       setPendingDeleteId(null)
       setActionMessage({ tone: 'success', title: '推文已删除', message: '该推文已从列表中移除。' })
     } catch (error) {
-      console.error('Failed to delete tweet:', error)
+      logClientError('Tweets.handleDelete', error)
       setActionMessage({ tone: 'error', title: '删除推文失败', message: formatTwitterActionError(error, '删除推文失败') })
     }
   }
@@ -163,7 +163,7 @@ export default function Tweets() {
       updateTweet(tweet)
       setActionMessage({ tone: 'success', title: '推文已发布', message: '推文已成功发送到 X/Twitter。' })
     } catch (error) {
-      console.error('Failed to publish tweet:', error)
+      logClientError('Tweets.handlePublish', error)
       setActionMessage({ tone: 'error', title: '发布失败', message: formatTwitterActionError(error, '发布失败') })
     }
   }
@@ -178,7 +178,7 @@ export default function Tweets() {
       setScheduleTime('')
       setActionMessage({ tone: 'success', title: '排期已保存', message: '推文定时发布设置已更新。' })
     } catch (error) {
-      console.error('Failed to schedule tweet:', error)
+      logClientError('Tweets.handleSchedule', error)
       setActionMessage({ tone: 'error', title: '设置定时发布失败', message: formatTwitterActionError(error, '设置定时发布失败') })
     }
   }
@@ -195,7 +195,7 @@ export default function Tweets() {
       setContent(res.content)
       setActionMessage({ tone: 'success', title: '草稿已生成', message: 'AI 已生成推文内容，可继续编辑后发布。' })
     } catch (error) {
-      console.error('Failed to generate content:', error)
+      logClientError('Tweets.handleGenerate', error)
       setActionMessage({ tone: 'error', title: 'AI 生成失败', message: '请检查 LLM 配置或稍后重试。' })
     } finally {
       setGenerating(false)

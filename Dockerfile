@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y \
     gcc \
     chromium \
     fonts-liberation \
+    fluxbox \
     libasound2 \
     libatk-bridge2.0-0 \
     libatk1.0-0 \
@@ -28,6 +29,10 @@ RUN apt-get update && apt-get install -y \
     libxfixes3 \
     libxkbcommon0 \
     libxrandr2 \
+    novnc \
+    websockify \
+    x11vnc \
+    xvfb \
     xdg-utils \
     && rm -rf /var/lib/apt/lists/*
 
@@ -37,10 +42,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy backend code
 COPY backend/app ./app
+COPY backend/scripts/start-backend.sh /app/start-backend.sh
 
 # Create directories
-RUN mkdir -p uploads data
+RUN chmod +x /app/start-backend.sh && mkdir -p uploads data
 
 EXPOSE 8000
+EXPOSE 6080
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["/app/start-backend.sh"]

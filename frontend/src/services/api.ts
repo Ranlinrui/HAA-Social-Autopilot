@@ -44,6 +44,12 @@ export function formatTwitterActionError(error: any, fallback = '操作失败，
   if (normalized.includes('browser 登录未进入密码输入步骤')) {
     return 'Browser 登录停留在用户名/邮箱步骤，未进入密码输入。通常是 X 额外校验、页面结构变化或当前代理环境触发拦截。'
   }
+  if (normalized.includes('browser 登录第一步提交后页面未继续')) {
+    return 'Browser 登录在第一步提交后没有进入下一页。通常是 X 登录页结构变化、当前代理环境异常，或当前会话被拦截。'
+  }
+  if (normalized.includes('browser 登录账号确认步骤未继续')) {
+    return 'Browser 登录已进入账号确认页，但提交后没有继续。通常表示 X 要求更复杂的身份校验，或当前登录环境被拦截。'
+  }
   if (normalized.includes('browser 模式未登录') || normalized.includes('当前未处于已登录状态')) {
     return '当前 Browser 会话未登录或登录态已失效，请先重新导入 Cookie，必要时再重新登录。'
   }
@@ -81,6 +87,14 @@ export function formatTwitterActionError(error: any, fallback = '操作失败，
     return '请求已发出，但在代理或 X 侧超时，请稍后重试。'
   }
   return detail
+}
+
+export function logClientError(scope: string, error: unknown) {
+  const env = (import.meta as ImportMeta & { env?: { DEV?: boolean } }).env
+  if (!env?.DEV) {
+    return
+  }
+  console.error(`[${scope}]`, error)
 }
 
 // Tweets API
@@ -211,8 +225,225 @@ export const settingsApi = {
     return res.data
   },
 
+  getTwitterAccounts: async (): Promise<Array<{
+    id: number
+    account_key: string
+    username: string
+    email?: string
+    is_active: boolean
+    password_saved: boolean
+    cookie_ready: boolean
+    browser_session_ready: boolean
+    automation_ready: boolean
+    last_login_status?: string
+    last_login_message?: string
+    created_at: string
+    updated_at: string
+  }>> => {
+    const res = await api.get('/settings/twitter-accounts')
+    return res.data
+  },
+
+  checkTwitterAccountHealth: async (accountId: number): Promise<{
+    success: boolean
+    account_key: string
+    username: string
+    cookie_ready: boolean
+    browser_session_ready: boolean
+    automation_ready: boolean
+    twikit_ok: boolean
+    twikit_message: string
+    browser_message: string
+    checked_at: string
+  }> => {
+    const res = await api.post(`/settings/twitter-accounts/${accountId}/health-check`)
+    return res.data
+  },
+
+  getTwitterModePresets: async (): Promise<{
+    success: boolean
+    presets: Array<{
+      key: string
+      label: string
+      description: string
+      settings: Record<string, string>
+    }>
+  }> => {
+    const res = await api.get('/settings/twitter-mode-presets')
+    return res.data
+  },
+
+  applyTwitterModePreset: async (presetKey: string): Promise<{
+    success: boolean
+    message: string
+    preset_key: string
+    settings: Record<string, string>
+  }> => {
+    const res = await api.post(`/settings/twitter-mode-presets/${presetKey}`)
+    return res.data
+  },
+
+  saveTwitterAccount: async (payload: {
+    account_key: string
+    username: string
+    email?: string
+    password?: string
+    is_active?: boolean
+  }): Promise<{
+    id: number
+    account_key: string
+    username: string
+    email?: string
+    is_active: boolean
+    password_saved: boolean
+    last_login_status?: string
+    last_login_message?: string
+    created_at: string
+    updated_at: string
+  }> => {
+    const res = await api.post('/settings/twitter-accounts', payload)
+    return res.data
+  },
+
+  activateTwitterAccount: async (accountId: number): Promise<{
+    id: number
+    account_key: string
+    username: string
+    email?: string
+    is_active: boolean
+    password_saved: boolean
+    last_login_status?: string
+    last_login_message?: string
+    created_at: string
+    updated_at: string
+  }> => {
+    const res = await api.post(`/settings/twitter-accounts/${accountId}/activate`)
+    return res.data
+  },
+
+  deleteTwitterAccount: async (accountId: number): Promise<{ success: boolean; message: string }> => {
+    const res = await api.delete(`/settings/twitter-accounts/${accountId}`)
+    return res.data
+  },
+
   resetTwitterRiskAccount: async (accountKey: string): Promise<{ success: boolean; message: string; removed: boolean }> => {
     const res = await api.delete(`/settings/twitter-risk-accounts/${encodeURIComponent(accountKey)}`)
+    return res.data
+  },
+
+  getTwitterBrowserSession: async (): Promise<{
+    success: boolean
+    message: string
+    username?: string
+    ready: boolean
+    updated_at?: string
+  }> => {
+    const res = await api.get('/settings/twitter-browser-session')
+    return res.data
+  },
+
+  syncTwitterBrowserSession: async (): Promise<{
+    success: boolean
+    message: string
+    username?: string
+    ready: boolean
+    updated_at?: string
+  }> => {
+    const res = await api.post('/settings/twitter-browser-session/sync')
+    return res.data
+  },
+
+  getTwitterBrowserTakeover: async (): Promise<{
+    success: boolean
+    message: string
+    username?: string
+    account_key?: string
+    ready: boolean
+    manual_login_active: boolean
+    vnc_url?: string
+    updated_at?: string
+    session_health?: {
+      ok: boolean
+      summary: string
+      checked_at?: string
+      checks: Array<{
+        name: string
+        ok: boolean
+        detail: string
+      }>
+    }
+  }> => {
+    const res = await api.get('/settings/twitter-browser-takeover')
+    return res.data
+  },
+
+  startTwitterBrowserTakeover: async (payload: {
+    username: string
+    email?: string
+    password?: string
+  }): Promise<{
+    success: boolean
+    message: string
+    username?: string
+    account_key?: string
+    ready: boolean
+    manual_login_active: boolean
+    vnc_url?: string
+    updated_at?: string
+    session_health?: {
+      ok: boolean
+      summary: string
+      checked_at?: string
+      checks: Array<{
+        name: string
+        ok: boolean
+        detail: string
+      }>
+    }
+  }> => {
+    const res = await api.post('/settings/twitter-browser-takeover/start', payload)
+    return res.data
+  },
+
+  completeTwitterBrowserTakeover: async (payload: {
+    username: string
+    email?: string
+    password?: string
+  }): Promise<{
+    success: boolean
+    message: string
+    username?: string
+    account_key?: string
+    ready: boolean
+    manual_login_active: boolean
+    vnc_url?: string
+    updated_at?: string
+    session_health?: {
+      ok: boolean
+      summary: string
+      checked_at?: string
+      checks: Array<{
+        name: string
+        ok: boolean
+        detail: string
+      }>
+    }
+  }> => {
+    const res = await api.post('/settings/twitter-browser-takeover/complete', payload)
+    return res.data
+  },
+
+  cancelTwitterBrowserTakeover: async (): Promise<{
+    success: boolean
+    message: string
+    username?: string
+    account_key?: string
+    ready: boolean
+    manual_login_active: boolean
+    vnc_url?: string
+    updated_at?: string
+  }> => {
+    const res = await api.post('/settings/twitter-browser-takeover/cancel')
     return res.data
   },
 

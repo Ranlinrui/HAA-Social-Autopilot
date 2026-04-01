@@ -11,6 +11,7 @@ import logging
 import random
 from datetime import datetime, timezone
 
+from app.config import settings
 from app.services.twitter_auth_backoff import (
     build_auth_backoff_until,
     build_automation_backoff_until,
@@ -24,6 +25,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.conversation import ConversationThread, ConversationSetting
+from app.services.twitter_account_store import get_effective_account_key, using_twitter_account
+from app.services.twitter_auto_action_guard import get_twitter_auto_action_guard
 from app.services.twitter_api import get_mentions, reply_tweet
 
 logger = logging.getLogger(__name__)
@@ -172,7 +175,7 @@ class ConversationService:
         while self.is_running:
             if is_backoff_active(self.auth_backoff_until):
                 remaining = seconds_until_backoff_expires(self.auth_backoff_until)
-                await asyncio.sleep(min(60, max(10, remaining)))
+                await asyncio.sleep(min(settings.conversation_default_poll_interval_seconds, max(60, remaining)))
                 continue
 
             try:
@@ -192,14 +195,16 @@ class ConversationService:
                     interval = cfg.poll_interval
                     break
             except Exception:
-                interval = 180
+                interval = settings.conversation_default_poll_interval_seconds
 
             await asyncio.sleep(interval)
 
     async def _process_mentions(self, db: AsyncSession, cfg: ConversationSetting):
         global _last_seen_notification_id
         try:
-            mentions = await get_mentions(count=40)
+            account_key = await get_effective_account_key()
+            async with using_twitter_account(account_key):
+                mentions = await get_mentions(count=settings.conversation_mentions_fetch_count)
         except Exception as e:
             if is_auth_failure(e):
                 self.auth_backoff_until = build_auth_backoff_until()
@@ -324,6 +329,7 @@ class ConversationService:
                 mention_dt = None
 
         thread = ConversationThread(
+            account_key=await get_effective_account_key(),
             root_tweet_id=root_tweet_id,
             root_tweet_text=root_tweet_text,
             our_reply_id=our_reply_id,
@@ -374,13 +380,32 @@ class ConversationService:
                 if not thread or thread.status != "pending":
                     return
 
+                guard_error = get_twitter_auto_action_guard().check_allowed(
+                    account_key=thread.account_key,
+                    action="reply",
+                    min_interval_seconds=settings.auto_action_min_interval_seconds,
+                    per_hour_limit=settings.auto_reply_hourly_limit,
+                    per_day_limit=settings.auto_action_daily_limit,
+                )
+                if guard_error:
+                    thread.status = "ignored"
+                    thread.auto_error = guard_error
+                    await db.commit()
+                    logger.info("Skipped auto-reply for thread %d: %s", thread_id, guard_error)
+                    return
+
                 content = thread.draft_reply
                 if not content:
                     content = await _generate_followup_reply(
                         thread.history or [], thread.from_username, thread.latest_mention_text
                     )
 
-                reply_id = await reply_tweet(thread.latest_mention_id, content)
+                async with using_twitter_account(thread.account_key):
+                    reply_id = await reply_tweet(thread.latest_mention_id, content)
+                get_twitter_auto_action_guard().record_success(
+                    account_key=thread.account_key,
+                    action="reply",
+                )
 
                 history = list(thread.history or [])
                 history.append({
